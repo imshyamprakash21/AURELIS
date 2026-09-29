@@ -38,11 +38,7 @@ impl AudioRingBuffer {
         let w = self.write.load(Ordering::Acquire);
         let r = self.read.load(Ordering::Acquire);
 
-        if w >= r {
-            w - r
-        } else {
-            self.capacity - r + w
-        }
+        if w >= r { w - r } else { self.capacity - r + w }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -95,12 +91,9 @@ impl AudioRingBuffer {
                 break;
             }
 
-            output[read_count] = unsafe {
-                *self.buffer.as_ptr().add(r)
-            };
+            output[read_count] = unsafe { *self.buffer.as_ptr().add(r) };
 
-            self.read
-                .store((r + 1) % self.capacity, Ordering::Release);
+            self.read.store((r + 1) % self.capacity, Ordering::Release);
 
             read_count += 1;
         }

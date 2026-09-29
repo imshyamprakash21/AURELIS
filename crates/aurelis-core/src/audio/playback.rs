@@ -1,52 +1,186 @@
-use std::error::Error;
-use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    error::Error,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
 };
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use super::{
-    AudioDecoder,
-    AudioOutput,
-    AudioQueue,
-    AudioResampler,
-    AudioSpec,
+    channel_converter::AudioChannelConverter, decoder_stream::AudioDecoder,
+    metadata::AudioMetadata, output::AudioOutput, resampler::AudioResampler, types::AudioSpec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
     Playing,
+    Paused,
+}
+
+enum WorkerResult {
+    Completed,
+    Stopped,
+    Failed(String),
+}
+
+enum WorkerCommand {
+    Pause,
+    Resume,
+    Seek,
+    Stop,
+    Shutdown,
+}
+
+struct PlaybackWorker {
+    command_tx: mpsc::Sender<WorkerCommand>,
+    result_rx: Mutex<mpsc::Receiver<WorkerResult>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl PlaybackWorker {
+    fn start(
+        path: String,
+        played_frames: Arc<AtomicU64>,
+        pending_seek: Arc<Mutex<Option<Duration>>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
+
+        let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
+
+        let handle = thread::Builder::new()
+            .name("aurelis-playback".to_string())
+            .spawn(move || {
+                let result = run_playback_pipeline(&path, &command_rx, played_frames, pending_seek);
+
+                let worker_result = match result {
+                    Ok(WorkerPipelineResult::Completed) => WorkerResult::Completed,
+
+                    Ok(WorkerPipelineResult::Stopped) => WorkerResult::Stopped,
+
+                    Err(error) => WorkerResult::Failed(error.to_string()),
+                };
+
+                let _ = result_tx.send(worker_result);
+            })?;
+
+        Ok(Self {
+            command_tx,
+            result_rx: Mutex::new(result_rx),
+            handle: Some(handle),
+        })
+    }
+
+    fn send(&self, command: WorkerCommand) -> Result<(), Box<dyn Error>> {
+        self.command_tx
+            .send(command)
+            .map_err(|_| "Playback worker is no longer running".into())
+    }
+
+    fn try_result(&self) -> Option<WorkerResult> {
+        let receiver = self.result_rx.lock().ok()?;
+
+        match receiver.try_recv() {
+            Ok(result) => Some(result),
+
+            Err(mpsc::TryRecvError::Empty) => None,
+
+            Err(mpsc::TryRecvError::Disconnected) => Some(WorkerResult::Failed(
+                "Playback worker disconnected".to_string(),
+            )),
+        }
+    }
+
+    fn wait(&mut self) -> Result<WorkerResult, Box<dyn Error>> {
+        let result = {
+            let receiver = self
+                .result_rx
+                .lock()
+                .map_err(|_| "Playback worker result lock poisoned")?;
+
+            receiver
+                .recv()
+                .map_err(|_| "Playback worker exited unexpectedly")?
+        };
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+
+        Ok(result)
+    }
+}
+
+impl Drop for PlaybackWorker {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(WorkerCommand::Shutdown);
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+enum WorkerPipelineResult {
+    Completed,
+    Stopped,
 }
 
 pub struct PlaybackEngine {
+    path: String,
+
     source_spec: AudioSpec,
     output_spec: AudioSpec,
+
+    metadata: AudioMetadata,
+
     resampling: bool,
+    channel_conversion: bool,
 
-    queue: AudioQueue,
+    state: PlaybackState,
 
-    stop_flag: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<PlaybackWorker>,
+
+    played_frames: Arc<AtomicU64>,
+
+    pending_seek: Arc<Mutex<Option<Duration>>>,
 }
 
 impl PlaybackEngine {
     pub fn open(path: &str) -> Result<Self, Box<dyn Error>> {
         let decoder = AudioDecoder::open(path)?;
+
         let source_spec = decoder.spec();
 
-        let output = AudioOutput::open(source_spec)?;
-        let output_spec = output.spec();
+        let output_spec = AudioOutput::negotiate_spec(source_spec)?;
+
+        let resampling = source_spec.sample_rate != output_spec.sample_rate;
+
+        let channel_conversion = source_spec.channels != output_spec.channels;
+
+        let metadata = AudioMetadata::from_file(path).unwrap_or_default();
 
         Ok(Self {
+            path: path.to_string(),
+
             source_spec,
             output_spec,
-            resampling: source_spec.sample_rate != output_spec.sample_rate,
-            queue: AudioQueue::new(),
-            stop_flag: Arc::new(AtomicBool::new(false)),
+
+            metadata,
+
+            resampling,
+            channel_conversion,
+
+            state: PlaybackState::Stopped,
+
             worker: None,
+
+            played_frames: Arc::new(AtomicU64::new(0)),
+
+            pending_seek: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -58,74 +192,219 @@ impl PlaybackEngine {
         self.output_spec
     }
 
+    /// Current position based on complete frames consumed by the output callback.
+    pub fn position(&self) -> Duration {
+        let frames = self.played_frames.load(Ordering::Relaxed);
+        let position = frames_to_duration(frames, self.output_spec.sample_rate);
+
+        self.metadata
+            .duration
+            .map_or(position, |duration| position.min(duration))
+    }
+
+    pub fn metadata(&self) -> &AudioMetadata {
+        &self.metadata
+    }
+
     pub fn is_resampling(&self) -> bool {
         self.resampling
     }
 
-    pub fn state(&self) -> PlaybackState {
+    pub fn is_channel_conversion(&self) -> bool {
+        self.channel_conversion
+    }
+
+    pub fn state(&mut self) -> PlaybackState {
+        self.poll_worker();
+
+        self.state
+    }
+
+    /// Start playback asynchronously.
+    ///
+    /// The playback worker is created and this
+    /// function returns immediately.
+    ///
+    /// The caller can then use pause(), resume(),
+    /// stop(), and poll() while playback continues.
+    pub fn play(&mut self) -> Result<(), Box<dyn Error>> {
         if self.worker.is_some() {
-            PlaybackState::Playing
-        } else {
-            PlaybackState::Stopped
-        }
-    }
+            return match self.state {
+                PlaybackState::Paused => {
+                    self.resume();
 
-    // ---------------- Queue ----------------
+                    Ok(())
+                }
 
-    pub fn enqueue<P: AsRef<Path>>(&mut self, path: P) {
-        self.queue.push(path);
-    }
+                PlaybackState::Playing => Ok(()),
 
-    pub fn next_track(&mut self) -> Option<PathBuf> {
-        self.queue.pop()
-    }
-
-    pub fn queue_len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn queue_is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    pub fn peek_track(&self) -> Option<&Path> {
-        self.queue.peek()
-    }
-
-    // ---------------- Playback ----------------
-
-    pub fn play(&mut self, path: String) -> Result<(), Box<dyn Error>> {
-        if self.worker.is_some() {
-            return Ok(());
+                PlaybackState::Stopped => self.start_worker(),
+            };
         }
 
-        self.stop_flag.store(false, Ordering::Relaxed);
+        self.start_worker()
+    }
 
-        let stop_flag = Arc::clone(&self.stop_flag);
-        let output_spec = self.output_spec;
+    fn start_worker(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("Starting playback...");
 
-        let handle = thread::spawn(move || {
-            if let Err(error) =
-                playback_worker(&path, output_spec, stop_flag)
-            {
-                eprintln!("Playback failed: {error}");
-            }
-        });
+        self.played_frames.store(0, Ordering::Relaxed);
 
-        self.worker = Some(handle);
+        let worker = PlaybackWorker::start(
+            self.path.clone(),
+            Arc::clone(&self.played_frames),
+            Arc::clone(&self.pending_seek),
+        )?;
+
+        self.worker = Some(worker);
+
+        self.state = PlaybackState::Playing;
 
         Ok(())
     }
 
-    pub fn wait(&mut self) {
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
+    /// Check whether the worker has finished.
+    ///
+    /// Returns Some(result) when playback has
+    /// completed or stopped.
+    pub fn poll(&mut self) -> Option<Result<(), Box<dyn Error>>> {
+        let result = self.poll_worker();
+
+        match result {
+            Some(WorkerResult::Completed) => {
+                println!("Playback complete.");
+
+                Some(Ok(()))
+            }
+
+            Some(WorkerResult::Stopped) => Some(Ok(())),
+
+            Some(WorkerResult::Failed(error)) => Some(Err(error.into())),
+
+            None => None,
         }
     }
 
+    fn poll_worker(&mut self) -> Option<WorkerResult> {
+        let result = self.worker.as_ref().and_then(|worker| worker.try_result());
+
+        if result.is_some() {
+            if let Some(worker) = self.worker.as_mut() {
+                if let Some(handle) = worker.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+
+            self.worker = None;
+
+            self.state = PlaybackState::Stopped;
+        }
+
+        result
+    }
+
+    /// Pause playback.
+    pub fn pause(&mut self) {
+        if self.state != PlaybackState::Playing {
+            return;
+        }
+
+        if let Some(worker) = self.worker.as_ref() {
+            if worker.send(WorkerCommand::Pause).is_ok() {
+                self.state = PlaybackState::Paused;
+            }
+        }
+    }
+
+    /// Resume paused playback.
+    pub fn resume(&mut self) {
+        if self.state != PlaybackState::Paused {
+            return;
+        }
+
+        if let Some(worker) = self.worker.as_ref() {
+            if worker.send(WorkerCommand::Resume).is_ok() {
+                self.state = PlaybackState::Playing;
+            }
+        }
+    }
+
+    /// Request a relative seek. The playback worker handles the demuxer seek
+    /// asynchronously; positive offsets seek forward and negative offsets
+    /// seek backward. The target is clamped to the track duration.
+    pub fn seek_by_seconds(&mut self, offset_seconds: i64) -> Result<(), Box<dyn Error>> {
+        if !matches!(self.state, PlaybackState::Playing | PlaybackState::Paused) {
+            return Err("Cannot seek unless playback is active".into());
+        }
+
+        let current = self.position();
+        let target = seek_target(current, offset_seconds, self.metadata.duration);
+        let worker = self
+            .worker
+            .as_ref()
+            .ok_or("Playback worker is not running")?;
+
+        {
+            let mut pending_seek = self
+                .pending_seek
+                .lock()
+                .map_err(|_| "Pending seek lock poisoned")?;
+            *pending_seek = Some(target);
+        }
+
+        if let Err(error) = worker.send(WorkerCommand::Seek) {
+            if let Ok(mut pending_seek) = self.pending_seek.lock() {
+                *pending_seek = None;
+            }
+
+            return Err(error);
+        }
+
+        self.played_frames.store(
+            duration_to_frames(target, self.output_spec.sample_rate),
+            Ordering::Relaxed,
+        );
+
+        Ok(())
+    }
+
+    /// Stop playback.
     pub fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        self.wait();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.send(WorkerCommand::Stop);
+        }
+
+        self.state = PlaybackState::Stopped;
+    }
+
+    /// Wait for playback to finish.
+    ///
+    /// This is retained for callers that want
+    /// the old blocking behavior.
+    pub fn wait(&mut self) -> Result<(), Box<dyn Error>> {
+        let worker = match self.worker.as_mut() {
+            Some(worker) => worker,
+
+            None => return Ok(()),
+        };
+
+        let result = worker.wait()?;
+
+        self.worker = None;
+
+        self.state = PlaybackState::Stopped;
+
+        match result {
+            WorkerResult::Completed => {
+                println!("Playback complete.");
+
+                Ok(())
+            }
+
+            WorkerResult::Stopped => Ok(()),
+
+            WorkerResult::Failed(error) => Err(error.into()),
+        }
     }
 }
 
@@ -135,54 +414,376 @@ impl Drop for PlaybackEngine {
     }
 }
 
-fn playback_worker(
+/// Run the complete audio pipeline on the
+/// dedicated playback worker thread.
+fn run_playback_pipeline(
     path: &str,
-    output_spec: AudioSpec,
-    stop_flag: Arc<AtomicBool>,
-) -> Result<(), Box<dyn Error>> {
+    command_rx: &mpsc::Receiver<WorkerCommand>,
+    played_frames: Arc<AtomicU64>,
+    pending_seek: Arc<Mutex<Option<Duration>>>,
+) -> Result<WorkerPipelineResult, Box<dyn Error>> {
     let mut decoder = AudioDecoder::open(path)?;
-    let source_spec = decoder.spec();
 
-    let output = AudioOutput::open(output_spec)?;
+    let output = AudioOutput::open_with_position(decoder.spec(), Arc::clone(&played_frames))?;
 
-    let mut resampler = if source_spec.sample_rate != output_spec.sample_rate {
-        Some(AudioResampler::new(source_spec, output_spec)?)
+    let output_spec = output.spec();
+
+    let channel_conversion = decoder.spec().channels != output_spec.channels;
+
+    let resampling = decoder.spec().sample_rate != output_spec.sample_rate;
+
+    let channel_output_spec = AudioSpec::new(decoder.spec().sample_rate, output_spec.channels);
+
+    let mut resampler = if resampling {
+        Some(AudioResampler::new(channel_output_spec, output_spec)?)
     } else {
         None
     };
 
-    while !stop_flag.load(Ordering::Relaxed) {
-        let chunk = match decoder.next_chunk()? {
-            Some(chunk) => chunk,
-            None => break,
-        };
+    'playback: loop {
+        'decode: loop {
+            match command_rx.try_recv() {
+                Ok(WorkerCommand::Pause) => {
+                    output.pause()?;
+                    let mut seeked_while_paused = false;
 
-        let is_final_chunk = decoder.is_finished();
+                    loop {
+                        match command_rx.recv()? {
+                            WorkerCommand::Resume => {
+                                output.resume()?;
 
-        if let Some(resampler) = &mut resampler {
-            let converted = if is_final_chunk {
-                resampler.process_final(&chunk)?
-            } else {
-                resampler.process(&chunk)?
+                                if seeked_while_paused {
+                                    continue 'playback;
+                                }
+
+                                break;
+                            }
+
+                            WorkerCommand::Seek => {
+                                if let Some(target) = take_pending_seek(&pending_seek) {
+                                    apply_seek(
+                                        target,
+                                        &mut decoder,
+                                        &output,
+                                        channel_conversion,
+                                        channel_output_spec,
+                                        resampler.as_mut(),
+                                        &played_frames,
+                                    )?;
+
+                                    seeked_while_paused = true;
+                                }
+                            }
+
+                            WorkerCommand::Stop | WorkerCommand::Shutdown => {
+                                output.stop()?;
+
+                                return Ok(WorkerPipelineResult::Stopped);
+                            }
+
+                            WorkerCommand::Pause => {}
+                        }
+                    }
+                }
+
+                Ok(WorkerCommand::Stop | WorkerCommand::Shutdown) => {
+                    output.stop()?;
+
+                    return Ok(WorkerPipelineResult::Stopped);
+                }
+
+                Ok(WorkerCommand::Resume) => {
+                    output.resume()?;
+                }
+
+                Ok(WorkerCommand::Seek) => {
+                    if let Some(target) = take_pending_seek(&pending_seek) {
+                        apply_seek(
+                            target,
+                            &mut decoder,
+                            &output,
+                            channel_conversion,
+                            channel_output_spec,
+                            resampler.as_mut(),
+                            &played_frames,
+                        )?;
+                    } else {
+                        continue 'decode;
+                    }
+                }
+
+                Err(mpsc::TryRecvError::Empty) => {}
+
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    output.stop()?;
+
+                    return Ok(WorkerPipelineResult::Stopped);
+                }
+            }
+
+            let chunk = match decode_next_output_chunk(
+                &mut decoder,
+                channel_conversion,
+                channel_output_spec,
+                resampler.as_mut(),
+            )? {
+                Some(chunk) => chunk,
+
+                None => break,
             };
 
-            output.push_samples(&converted.samples);
-        } else {
-            output.push_samples(&chunk.samples);
+            if !chunk.samples.is_empty() {
+                output.push_samples(&chunk.samples);
+            }
+        }
+
+        if let Some(resampler) = resampler.as_mut() {
+            let tail = resampler.flush()?;
+
+            if !tail.samples.is_empty() {
+                output.push_samples(&tail.samples);
+            }
+        }
+
+        while output.pending_samples() > 0 {
+            match command_rx.try_recv() {
+                Ok(WorkerCommand::Pause) => {
+                    output.pause()?;
+                    let mut seeked_while_paused = false;
+
+                    loop {
+                        match command_rx.recv()? {
+                            WorkerCommand::Resume => {
+                                output.resume()?;
+
+                                if seeked_while_paused {
+                                    continue 'playback;
+                                }
+
+                                break;
+                            }
+
+                            WorkerCommand::Seek => {
+                                if let Some(target) = take_pending_seek(&pending_seek) {
+                                    apply_seek(
+                                        target,
+                                        &mut decoder,
+                                        &output,
+                                        channel_conversion,
+                                        channel_output_spec,
+                                        resampler.as_mut(),
+                                        &played_frames,
+                                    )?;
+
+                                    seeked_while_paused = true;
+                                }
+                            }
+
+                            WorkerCommand::Stop | WorkerCommand::Shutdown => {
+                                output.stop()?;
+
+                                return Ok(WorkerPipelineResult::Stopped);
+                            }
+
+                            WorkerCommand::Pause => {}
+                        }
+                    }
+                }
+
+                Ok(WorkerCommand::Stop | WorkerCommand::Shutdown) => {
+                    output.stop()?;
+
+                    return Ok(WorkerPipelineResult::Stopped);
+                }
+
+                Ok(WorkerCommand::Resume) => {
+                    output.resume()?;
+                }
+
+                Ok(WorkerCommand::Seek) => {
+                    if let Some(target) = take_pending_seek(&pending_seek) {
+                        apply_seek(
+                            target,
+                            &mut decoder,
+                            &output,
+                            channel_conversion,
+                            channel_output_spec,
+                            resampler.as_mut(),
+                            &played_frames,
+                        )?;
+
+                        continue 'playback;
+                    }
+                }
+
+                Err(mpsc::TryRecvError::Empty) => {}
+
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    output.stop()?;
+
+                    return Ok(WorkerPipelineResult::Stopped);
+                }
+            }
+
+            if output.needs_rebuild() {
+                return Err("Audio device changed. Stream needs rebuilding.".into());
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        thread::sleep(Duration::from_millis(50));
+
+        if output.needs_rebuild() {
+            return Err("Audio device changed. Stream needs rebuilding.".into());
+        }
+
+        output.stop()?;
+
+        return Ok(WorkerPipelineResult::Completed);
+    }
+}
+
+fn apply_seek(
+    target: Duration,
+    decoder: &mut AudioDecoder,
+    output: &AudioOutput,
+    channel_conversion: bool,
+    channel_output_spec: AudioSpec,
+    resampler: Option<&mut AudioResampler>,
+    played_frames: &AtomicU64,
+) -> Result<(), Box<dyn Error>> {
+    let resume_after_seek = output.is_playing();
+    output.pause()?;
+
+    output.clear_buffer()?;
+
+    let actual = decoder.seek_to(target)?;
+
+    let mut resampler = resampler;
+    if let Some(resampler) = resampler.as_mut() {
+        resampler.reset();
+    }
+
+    played_frames.store(
+        duration_to_frames(actual, output.spec().sample_rate),
+        Ordering::Relaxed,
+    );
+
+    if let Some(pcm) =
+        decode_next_output_chunk(decoder, channel_conversion, channel_output_spec, resampler)?
+    {
+        if !pcm.samples.is_empty() {
+            output.push_samples(&pcm.samples);
+        }
+
+        if resume_after_seek {
+            output.resume()?;
         }
     }
-
-    if let Some(resampler) = &mut resampler {
-        let remaining = resampler.flush()?;
-
-        if !remaining.samples.is_empty() {
-            output.push_samples(&remaining.samples);
-        }
-    }
-
-    while output.pending_samples() > 0 {
-        thread::sleep(Duration::from_millis(10));
-    }
-
     Ok(())
+}
+
+fn decode_next_output_chunk(
+    decoder: &mut AudioDecoder,
+    channel_conversion: bool,
+    channel_output_spec: AudioSpec,
+    resampler: Option<&mut AudioResampler>,
+) -> Result<Option<super::types::PcmBuffer>, Box<dyn Error>> {
+    let Some(chunk) = decoder.next_chunk()? else {
+        return Ok(None);
+    };
+
+    let pcm = if channel_conversion {
+        AudioChannelConverter::convert(&chunk, channel_output_spec)?
+    } else {
+        chunk
+    };
+
+    let pcm = if let Some(resampler) = resampler {
+        let frames = pcm.frame_count();
+        let expected = resampler.input_frames_next();
+
+        if frames == expected {
+            resampler.process(&pcm)?
+        } else {
+            resampler.process_final(&pcm)?
+        }
+    } else {
+        pcm
+    };
+
+    Ok(Some(pcm))
+}
+
+fn take_pending_seek(pending_seek: &Mutex<Option<Duration>>) -> Option<Duration> {
+    pending_seek
+        .lock()
+        .ok()
+        .and_then(|mut target| target.take())
+}
+
+fn seek_target(current: Duration, offset_seconds: i64, total: Option<Duration>) -> Duration {
+    let offset = Duration::from_secs(offset_seconds.unsigned_abs());
+    let target = if offset_seconds < 0 {
+        current.saturating_sub(offset)
+    } else {
+        current.saturating_add(offset)
+    };
+
+    total.map_or(target, |duration| target.min(duration))
+}
+
+fn duration_to_frames(position: Duration, sample_rate: u32) -> u64 {
+    (position.as_nanos() * u128::from(sample_rate) / 1_000_000_000).min(u128::from(u64::MAX)) as u64
+}
+
+fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
+    if sample_rate == 0 {
+        return Duration::ZERO;
+    }
+
+    let rate = u64::from(sample_rate);
+    let seconds = frames / rate;
+    let nanoseconds = ((frames % rate) * 1_000_000_000 / rate) as u32;
+    Duration::new(seconds, nanoseconds)
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::{seek_target, take_pending_seek};
+    use std::{sync::Mutex, time::Duration};
+
+    #[test]
+    fn seek_backward_clamps_to_zero() {
+        assert_eq!(
+            seek_target(Duration::from_secs(3), -5, Some(Duration::from_secs(200))),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn seek_forward_clamps_to_duration() {
+        assert_eq!(
+            seek_target(Duration::from_secs(198), 5, Some(Duration::from_secs(200))),
+            Duration::from_secs(200)
+        );
+    }
+
+    #[test]
+    fn seek_forward_advances_by_requested_offset() {
+        assert_eq!(
+            seek_target(Duration::from_secs(42), 5, Some(Duration::from_secs(200))),
+            Duration::from_secs(47)
+        );
+    }
+
+    #[test]
+    fn pending_seek_uses_latest_requested_target() {
+        let pending = Mutex::new(Some(Duration::from_secs(42)));
+        *pending.lock().unwrap() = Some(Duration::from_secs(47));
+
+        assert_eq!(take_pending_seek(&pending), Some(Duration::from_secs(47)));
+        assert_eq!(take_pending_seek(&pending), None);
+    }
 }

@@ -95,9 +95,7 @@ impl PcmStream {
     pub fn pop(&mut self) -> Option<PcmBuffer> {
         let buffer = self.chunks.pop_front()?;
 
-        self.queued_frames = self
-            .queued_frames
-            .saturating_sub(buffer.frame_count());
+        self.queued_frames = self.queued_frames.saturating_sub(buffer.frame_count());
 
         Some(buffer)
     }
@@ -166,10 +164,7 @@ mod tests {
 
         let mut stream = PcmStream::new(stream_spec, 1_000);
 
-        let buffer = PcmBuffer::new(
-            buffer_spec,
-            vec![0.0; 200],
-        );
+        let buffer = PcmBuffer::new(buffer_spec, vec![0.0; 200]);
 
         assert!(!stream.push(buffer));
         assert!(stream.is_empty());

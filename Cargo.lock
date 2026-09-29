@@ -68,6 +68,7 @@ name = "aurelis-app"
 version = "0.1.0"
 dependencies = [
  "aurelis-core",
+ "windows",
 ]
 
 [[package]]
