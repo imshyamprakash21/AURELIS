@@ -10,6 +10,6 @@ pub mod types;
 
 pub use metadata::AudioMetadata;
 
-pub use playback::{PlaybackEngine, PlaybackState};
+pub use playback::{PlaybackEndReason, PlaybackEngine, PlaybackState};
 
 pub use types::{AudioSpec, PcmBuffer};

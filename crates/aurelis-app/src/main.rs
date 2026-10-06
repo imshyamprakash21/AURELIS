@@ -6,84 +6,34 @@ use std::{
     time::Duration,
 };
 
-use aurelis_core::audio::{AudioMetadata, PlaybackEngine};
+use aurelis_core::{
+    audio::{AudioMetadata, PlaybackEndReason, PlaybackEngine},
+    library::MusicLibrary,
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod library_browser;
+mod library_play_test;
+mod library_search;
+mod library_test;
+mod player_controller;
+
+use player_controller::{PlaybackControlTarget, PlaybackSnapshot};
+
+const BOX_WIDTH: usize = 72;
+const BOX_INNER: usize = BOX_WIDTH - 2;
+
+const LABEL_WIDTH: usize = 13;
+const VALUE_WIDTH: usize = BOX_INNER - LABEL_WIDTH - 6;
+
+const QUEUE_NO_WIDTH: usize = 5;
+const QUEUE_TITLE_WIDTH: usize = 42;
+const QUEUE_ID_WIDTH: usize = 15;
+
+const PROGRESS_BAR_WIDTH: usize = 40;
 
 fn print_field(label: &str, value: Option<&str>) {
-    println!("{:<12}: {}", label, value.unwrap_or("Unknown"));
-}
-
-fn print_metadata(metadata: &AudioMetadata) {
-    println!("AURELIS");
-    println!("────────────────────────");
-
-    print_field("Title", metadata.title.as_deref());
-
-    print_field("Artist", metadata.artist.as_deref());
-
-    print_field("Album", metadata.album.as_deref());
-
-    print_field("Genre", metadata.genre.as_deref());
-
-    print_field("Year", metadata.year.as_deref());
-
-    println!(
-        "{:<12}: {}",
-        "Track",
-        metadata
-            .track
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "-".to_string())
-    );
-
-    println!("{:<12}: {}", "Duration", metadata.duration_string());
-
-    println!(
-        "{:<12}: {}",
-        "Codec",
-        if metadata.codec.is_empty() {
-            "Unknown"
-        } else {
-            &metadata.codec
-        }
-    );
-
-    println!(
-        "{:<12}: {} Hz",
-        "Sample Rate",
-        metadata.sample_rate.unwrap_or(0)
-    );
-
-    println!(
-        "{:<12}: {}",
-        "Bit Depth",
-        metadata
-            .bit_depth
-            .map(|b| format!("{b}-bit"))
-            .unwrap_or_else(|| "Unknown".to_string())
-    );
-
-    println!(
-        "{:<12}: {}",
-        "Channels",
-        metadata
-            .channels
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "Unknown".to_string())
-    );
-}
-
-fn print_usage() {
-    println!("AURELIS");
-    println!("────────────────────────");
-    println!();
-    println!("Usage:");
-    println!("  aurelis-app --help");
-    println!("  aurelis-app <audio-file>");
-    println!("  aurelis-app --info <audio-file>");
-    println!();
-    println!(
-        "During playback, press ←/→ to seek 5 seconds, p to pause, r to resume, s to stop, or q to quit."
-    );
+    println!("{:<12}  {}", label, value.unwrap_or("Unknown"));
 }
 
 fn format_time(position: Duration) -> String {
@@ -94,14 +44,520 @@ fn format_time(position: Duration) -> String {
     )
 }
 
-fn format_position(position: Duration, total: Option<Duration>) -> String {
-    let current = format_time(position);
+fn truncate_text(value: &str, width: usize) -> String {
+    let clean = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
 
-    match total {
-        Some(total) => format!("{} / {}", current, format_time(total)),
-        None => format!("{} / --:--", current),
+    if display_width(&clean) <= width {
+        return clean;
+    }
+
+    if width <= 3 {
+        return take_text_width(&clean, width);
+    }
+
+    format!("{}...", take_text_width(&clean, width - 3))
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn take_text_width(value: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut used_width = 0;
+
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used_width + character_width > width {
+            break;
+        }
+
+        result.push(character);
+        used_width += character_width;
+    }
+
+    result
+}
+
+fn pad_text_right(value: &str, width: usize) -> String {
+    format!(
+        "{value}{}",
+        " ".repeat(width.saturating_sub(display_width(value)))
+    )
+}
+
+fn pad_text_left(value: &str, width: usize) -> String {
+    format!(
+        "{}{value}",
+        " ".repeat(width.saturating_sub(display_width(value)))
+    )
+}
+
+fn print_event(message: impl std::fmt::Display) {
+    println!();
+    println!("  ◆  {message}");
+}
+
+/* ============================================================
+ * HELP / METADATA
+ * ============================================================
+ */
+
+fn print_metadata(metadata: &AudioMetadata) {
+    println!("AURELIS");
+    println!("────────");
+    println!();
+
+    print_field("Title", metadata.title.as_deref());
+    print_field("Artist", metadata.artist.as_deref());
+    print_field("Album", metadata.album.as_deref());
+    print_field("Genre", metadata.genre.as_deref());
+    print_field("Year", metadata.year.as_deref());
+
+    println!(
+        "{:<12}  {}",
+        "Track",
+        metadata
+            .track
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+
+    println!("{:<12}  {}", "Duration", metadata.duration_string());
+
+    println!(
+        "{:<12}  {}",
+        "Codec",
+        if metadata.codec.is_empty() {
+            "Unknown"
+        } else {
+            &metadata.codec
+        }
+    );
+
+    println!(
+        "{:<12}  {}",
+        "Sample Rate",
+        metadata
+            .sample_rate
+            .map(|rate| format!("{rate} Hz"))
+            .unwrap_or_else(|| "Unknown".to_string())
+    );
+
+    println!(
+        "{:<12}  {}",
+        "Bit Depth",
+        metadata
+            .bit_depth
+            .map(|b| format!("{b}-bit"))
+            .unwrap_or_else(|| "Unknown".to_string())
+    );
+
+    println!(
+        "{:<12}  {}",
+        "Channels",
+        metadata
+            .channels
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    );
+}
+
+fn print_usage() {
+    println!();
+    println!("AURELIS");
+    println!("────────────────────────────────────────────────────────");
+    println!();
+    println!("PLAYBACK");
+    println!("  <file>                         Play an audio file");
+    println!("  library-play <directory> <track-id> [queued-track-id ...]");
+    println!("  library-play <directory> --all");
+    println!();
+    println!("LIBRARY");
+    println!("  library <directory>            Browse the library");
+    println!();
+    println!("SEARCH & QUERY");
+    println!("  library-search <directory> <query>");
+    println!("  library-search-play <directory> <query> <result-number>");
+    println!("  library-search-play-all <directory> <query>");
+    println!("  library-query <directory> <query-options>");
+    println!("  library-query-play <directory> <result-number> <query-options>");
+    println!("  library-query-play-all <directory> <query-options>");
+    println!("  Options: --search, --artist, --album, --genre, --year, --sort, --order");
+    println!("  Sort keys: title, artist, album, year, track, duration, path");
+    println!("  Sort order: asc or desc (default: title ascending)");
+    println!();
+    println!("INFORMATION");
+    println!("  --help                         Show command help");
+    println!("  --info <file>                  Show technical audio metadata");
+    println!();
+    println!("DEVELOPMENT / TEST");
+    println!("  library-test <directory>       Run the interactive library diagnostics");
+} /* ============================================================
+ * BOX PRIMITIVES
+ * ============================================================
+ */
+
+fn print_player_header() {
+    println!();
+    println!("╭{}╮", "─".repeat(BOX_INNER));
+    println!("│{:^inner$}│", "AURELIS  PLAYER", inner = BOX_INNER);
+    println!("╰{}╯", "─".repeat(BOX_INNER));
+}
+
+fn print_section_header(title: &str) {
+    let title = format!("  {title}  ");
+    let remaining = BOX_INNER.saturating_sub(title.chars().count());
+
+    println!("┌{}{}┐", title, "─".repeat(remaining));
+}
+
+fn print_section_bottom() {
+    println!("└{}┘", "─".repeat(BOX_INNER));
+}
+
+fn print_section_row(label: &str, value: impl std::fmt::Display) {
+    let value = truncate_text(&value.to_string(), VALUE_WIDTH);
+
+    println!(
+        "│ {}│ {} │",
+        pad_text_right(label, LABEL_WIDTH),
+        pad_text_right(&value, VALUE_WIDTH)
+    );
+}
+
+fn print_section_divider(widths: &[usize]) {
+    print!("├");
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            print!("┼");
+        }
+        print!("{}", "─".repeat(*width + 2));
+    }
+    println!("┤");
+}
+
+/* ============================================================
+ * NOW PLAYING
+ * ============================================================
+ */
+
+fn playback_state_label(snapshot: &PlaybackSnapshot) -> &'static str {
+    match snapshot.state() {
+        player_controller::PlaybackStatus::Playing => "▶  Playing",
+        player_controller::PlaybackStatus::Paused => "Ⅱ  Paused",
+        player_controller::PlaybackStatus::Stopped => "■  Stopped",
+        player_controller::PlaybackStatus::Finished => "✓  Finished",
     }
 }
+
+fn print_now_playing(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+    print_section_header("NOW PLAYING");
+
+    match snapshot.current_track_id() {
+        Some(track_id) => match library.get(track_id) {
+            Some(track) => {
+                print_section_row("Title", track.display_title());
+                print_section_row("Artist", track.display_artist());
+                print_section_row("Album", track.display_album());
+                print_section_row("State", playback_state_label(snapshot));
+            }
+            None => {
+                print_section_row("Track", format!("{track_id:?} unavailable"));
+            }
+        },
+        None => {
+            print_section_row("Track", "Nothing playing");
+        }
+    }
+
+    print_section_bottom();
+}
+
+/* ============================================================
+ * PROGRESS
+ * ============================================================
+ */
+
+fn progress_bar(position: Duration, total: Option<Duration>, width: usize) -> String {
+    let current = position.as_secs_f64();
+    let total = total.map(|duration| duration.as_secs_f64()).unwrap_or(0.0);
+
+    let filled = if total > 0.0 {
+        ((current / total) * width as f64).round() as usize
+    } else {
+        0
+    };
+
+    let filled = filled.min(width);
+
+    format!("{}{}", "━".repeat(filled), "·".repeat(width - filled))
+}
+
+fn print_progress(snapshot: &PlaybackSnapshot) {
+    print_section_header("PROGRESS");
+
+    let left = format_time(snapshot.position());
+    let right = snapshot
+        .duration()
+        .map(format_time)
+        .unwrap_or_else(|| "--:--".to_string());
+
+    let bar = progress_bar(snapshot.position(), snapshot.duration(), PROGRESS_BAR_WIDTH);
+
+    let content = format!("{left}  {bar}  {right}");
+
+    println!("│ {:<inner$} │", content, inner = BOX_INNER);
+
+    print_section_bottom();
+}
+
+/* ============================================================
+ * QUEUE
+ * ============================================================
+ */
+
+fn queue_track_label(library: &MusicLibrary, track_id: aurelis_core::library::TrackId) -> String {
+    library
+        .get(track_id)
+        .map(|track| track.display_title().into_owned())
+        .unwrap_or_else(|| format!("Unavailable {track_id:?}"))
+}
+
+fn print_queue(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+    let queue = snapshot.queue();
+
+    print_section_header("QUEUE");
+
+    println!(
+        "│ {} │ {} │ {} │",
+        pad_text_right("#", QUEUE_NO_WIDTH),
+        pad_text_right("TITLE", QUEUE_TITLE_WIDTH),
+        pad_text_right("ID", QUEUE_ID_WIDTH)
+    );
+
+    print_section_divider(&[QUEUE_NO_WIDTH, QUEUE_TITLE_WIDTH, QUEUE_ID_WIDTH]);
+
+    if queue.is_empty() {
+        println!(
+            "│ {} │ {} │ {} │",
+            " ".repeat(QUEUE_NO_WIDTH),
+            pad_text_right("Queue is empty", QUEUE_TITLE_WIDTH),
+            " ".repeat(QUEUE_ID_WIDTH)
+        );
+    } else {
+        for (index, track_id) in queue.track_ids().iter().enumerate() {
+            let marker = if queue.current_index() == Some(index) {
+                "▶"
+            } else {
+                ""
+            };
+
+            let number = format!("{marker}{}", index + 1);
+            let title = queue_track_label(library, *track_id);
+            let id = format!("{track_id:?}");
+
+            let number = truncate_text(&number, QUEUE_NO_WIDTH);
+            let title = truncate_text(&title, QUEUE_TITLE_WIDTH);
+            let id = truncate_text(&id, QUEUE_ID_WIDTH);
+            println!(
+                "│ {} │ {} │ {} │",
+                pad_text_right(&number, QUEUE_NO_WIDTH),
+                pad_text_right(&title, QUEUE_TITLE_WIDTH),
+                pad_text_right(&id, QUEUE_ID_WIDTH)
+            );
+        }
+    }
+
+    print_section_bottom();
+}
+
+/* ============================================================
+ * QUEUE POSITION
+ * ============================================================
+ */
+
+fn print_queue_position(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+    let queue = snapshot.queue();
+
+    print_section_header("QUEUE POSITION");
+
+    let current = queue
+        .current_index()
+        .map(|index| format!("{} / {}", index + 1, queue.len()))
+        .unwrap_or_else(|| "—".to_string());
+
+    let previous = queue
+        .previous_track_id()
+        .map(|id| queue_track_label(library, id))
+        .unwrap_or_else(|| "—".to_string());
+
+    let next = queue
+        .next_track_id()
+        .map(|id| queue_track_label(library, id))
+        .unwrap_or_else(|| "—".to_string());
+
+    print_section_row("Current", current);
+    print_section_row("Previous", previous);
+    print_section_row("Next", next);
+
+    print_section_bottom();
+}
+
+/* ============================================================
+ * CONTROLS
+ * ============================================================
+ */
+
+fn print_controls(queue_enabled: bool) {
+    print_section_header("CONTROLS");
+
+    let rows = if queue_enabled {
+        vec![
+            ("← / →", "Seek 5 seconds"),
+            ("p", "Pause"),
+            ("r", "Resume"),
+            ("n", "Next track"),
+            ("b", "Previous track"),
+            ("c", "Clear queue"),
+            ("status", "Technical details"),
+            ("s", "Stop"),
+            ("q", "Quit"),
+        ]
+    } else {
+        vec![
+            ("← / →", "Seek 5 seconds"),
+            ("p", "Pause"),
+            ("r", "Resume"),
+            ("status", "Technical details"),
+            ("s", "Stop"),
+            ("q", "Quit"),
+        ]
+    };
+
+    for (key, description) in rows {
+        let content = format!("{key:<10} {description}");
+        println!("│ {:<inner$} │", content, inner = BOX_INNER);
+    }
+
+    print_section_bottom();
+}
+
+/* ============================================================
+ * TECHNICAL DETAILS
+ * ============================================================
+ */
+
+fn print_track_details(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+    println!();
+
+    let Some(track_id) = snapshot.current_track_id() else {
+        print_section_header("TRACK DETAILS");
+        print_section_row("Track", "Nothing selected");
+        print_section_bottom();
+        return;
+    };
+
+    let Some(track) = library.get(track_id) else {
+        print_section_header("TRACK DETAILS");
+        print_section_row("Track", format!("{track_id:?} unavailable"));
+        print_section_bottom();
+        return;
+    };
+
+    let metadata = track.metadata();
+
+    print_section_header("TRACK DETAILS");
+    print_section_row("Title", track.display_title());
+    print_section_row("Artist", track.display_artist());
+    print_section_row("Album", track.display_album());
+    print_section_row("Genre", metadata.genre.as_deref().unwrap_or("Unknown"));
+    print_section_row("Year", metadata.year.as_deref().unwrap_or("Unknown"));
+    print_section_row(
+        "Track",
+        metadata
+            .track
+            .map(|number| number.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    print_section_row(
+        "Codec",
+        if metadata.codec.is_empty() {
+            "Unknown"
+        } else {
+            &metadata.codec
+        },
+    );
+    print_section_row(
+        "Sample Rate",
+        metadata
+            .sample_rate
+            .map(|rate| format!("{rate} Hz"))
+            .unwrap_or_else(|| "Unknown".to_string()),
+    );
+    print_section_row(
+        "Bit Depth",
+        metadata
+            .bit_depth
+            .map(|depth| format!("{depth}-bit"))
+            .unwrap_or_else(|| "Unknown".to_string()),
+    );
+    print_section_row(
+        "Channels",
+        metadata
+            .channels
+            .map(|channels| channels.to_string())
+            .unwrap_or_else(|| "Unknown".to_string()),
+    );
+    print_section_row("Duration", metadata.duration_string());
+    print_section_row("Path", track.path().display());
+    print_section_bottom();
+}
+
+/* ============================================================
+ * COMPLETE PLAYER SCREEN
+ * ============================================================
+ */
+
+fn print_player_screen(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+    print_player_header();
+
+    println!();
+
+    print_now_playing(library, snapshot);
+
+    println!();
+
+    print_progress(snapshot);
+
+    println!();
+
+    print_queue(library, snapshot);
+
+    println!();
+
+    print_queue_position(library, snapshot);
+
+    println!();
+
+    print_controls(true);
+
+    println!();
+}
+
+/* ============================================================
+ * INPUT
+ * ============================================================
+ */
 
 fn start_control_reader(command_tx: mpsc::Sender<String>) -> io::Result<()> {
     thread::Builder::new()
@@ -110,6 +566,7 @@ fn start_control_reader(command_tx: mpsc::Sender<String>) -> io::Result<()> {
             #[cfg(windows)]
             if io::stdin().is_terminal() {
                 read_windows_console_keys(command_tx);
+
                 return;
             }
 
@@ -119,6 +576,7 @@ fn start_control_reader(command_tx: mpsc::Sender<String>) -> io::Result<()> {
                 };
 
                 let command = normalize_control_line(&line);
+
                 if let Some(command) = command
                     && command_tx.send(command).is_err()
                 {
@@ -135,8 +593,11 @@ fn normalize_control_line(line: &str) -> Option<String> {
 
     let normalized = match command.as_str() {
         "\u{1b}[d" | "\u{1b}od" | "left" => "left",
+
         "\u{1b}[c" | "\u{1b}oc" | "right" => "right",
+
         "" => return None,
+
         _ => return Some(command),
     };
 
@@ -155,6 +616,7 @@ fn read_windows_console_keys(command_tx: mpsc::Sender<String>) {
 
     loop {
         let mut records = [INPUT_RECORD::default()];
+
         let mut count = 0;
 
         if unsafe { ReadConsoleInputW(input_handle, &mut records, &mut count) }.is_err() {
@@ -167,15 +629,19 @@ fn read_windows_console_keys(command_tx: mpsc::Sender<String>) {
             }
 
             let key = unsafe { record.Event.KeyEvent };
+
             if !key.bKeyDown.as_bool() {
                 continue;
             }
 
             let command = match key.wVirtualKeyCode {
-                0x25 => "left".to_string(),  // VK_LEFT
-                0x27 => "right".to_string(), // VK_RIGHT
+                0x25 => "left".to_string(),
+
+                0x27 => "right".to_string(),
+
                 _ => {
                     let character = unsafe { key.uChar.UnicodeChar };
+
                     let Some(command) = char::from_u32(character as u32) else {
                         continue;
                     };
@@ -195,6 +661,11 @@ fn read_windows_console_keys(command_tx: mpsc::Sender<String>) {
     }
 }
 
+/* ============================================================
+ * LIVE PROGRESS
+ * ============================================================
+ */
+
 fn clear_position_line(width: usize) -> io::Result<()> {
     if width > 0 {
         print!("\r{}\r", " ".repeat(width));
@@ -204,94 +675,527 @@ fn clear_position_line(width: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn run_playback_controls(engine: &mut PlaybackEngine) -> Result<(), Box<dyn std::error::Error>> {
+fn finish_position_line(width: usize) -> io::Result<()> {
+    if width > 0 {
+        clear_position_line(width)?;
+        println!();
+    }
+
+    Ok(())
+}
+
+fn format_progress_line(position: Duration, total: Option<Duration>) -> String {
+    let bar = progress_bar(position, total, PROGRESS_BAR_WIDTH);
+
+    format!(
+        "  {}  {}  {}",
+        format_time(position),
+        bar,
+        total
+            .map(format_time)
+            .unwrap_or_else(|| "--:--".to_string())
+    )
+}
+
+/* ============================================================
+ * PLAYBACK CONTROL LOOP
+ * ============================================================
+ */
+
+fn run_playback_controls<T: PlaybackControlTarget>(
+    engine: &mut T,
+    library: Option<&MusicLibrary>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (command_tx, command_rx) = mpsc::channel::<String>();
+
     start_control_reader(command_tx)?;
 
-    println!("Controls: ←/→ seek 5 seconds, [p]ause, [r]esume, [s]top, [q]uit");
-    let total_duration = engine.metadata().duration;
+    let mut observed_track_id = engine.current_track_id();
+
     let mut last_position_second = None;
+
     let mut position_line_width = 0;
+
+    let mut position_line_cleared_near_end = false;
+
+    /*
+     * Initial screen.
+     */
+    if let Some(library) = library {
+        if let Some(snapshot) = engine.playback_snapshot(Some(library)) {
+            print_player_screen(library, &snapshot);
+        }
+    } else {
+        println!();
+
+        print_controls(false);
+
+        println!();
+    }
 
     loop {
         loop {
             match command_rx.try_recv() {
-                Ok(command) => match command.as_str() {
-                    "p" | "pause" => {
-                        engine.pause();
-                        let position = format_time(engine.position());
-                        clear_position_line(position_line_width)?;
-                        println!("Playback paused at {}.", position);
-                        position_line_width = 0;
-                        last_position_second = None;
-                    }
-                    "r" | "resume" => {
-                        engine.resume();
-                        let position = format_time(engine.position());
-                        clear_position_line(position_line_width)?;
-                        println!("Playback resumed at {}.", position);
-                        position_line_width = 0;
-                        last_position_second = None;
-                    }
-                    "left" => {
-                        if let Err(error) = engine.seek_by_seconds(-5) {
-                            clear_position_line(position_line_width)?;
-                            println!("Seek failed: {error}");
+                Ok(command) => {
+                    match command.as_str() {
+                        /* --------------------
+                         * PAUSE
+                         * --------------------
+                         */
+                        "p" | "pause" => {
+                            engine.pause();
+
+                            let position = format_time(engine.position());
+
+                            finish_position_line(position_line_width)?;
+
+                            print_event(format!("Paused at {position}"));
+
                             position_line_width = 0;
+
+                            last_position_second = None;
+                        }
+
+                        /* --------------------
+                         * RESUME
+                         * --------------------
+                         */
+                        "r" | "resume" => {
+                            engine.resume();
+
+                            let position = format_time(engine.position());
+
+                            finish_position_line(position_line_width)?;
+
+                            print_event(format!("Resumed at {position}"));
+
+                            position_line_width = 0;
+
+                            last_position_second = None;
+                        }
+
+                        /* --------------------
+                         * CLEAR QUEUE
+                         * --------------------
+                         */
+                        "c" | "clear" => match engine.clear_queue_entries() {
+                            Ok(()) => {
+                                finish_position_line(position_line_width)?;
+
+                                print_event("Queue cleared. Current playback continues.");
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+                            }
+
+                            Err(error) => {
+                                finish_position_line(position_line_width)?;
+
+                                print_event(format!("Could not clear queue: {error}"));
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+                            }
+                        },
+
+                        /* --------------------
+                         * NEXT
+                         * --------------------
+                         */
+                        "n" | "next" => {
+                            finish_position_line(position_line_width)?;
+
+                            match engine.next_track(library) {
+                                Ok(Some(track_id)) => {
+                                    print_event(format!("Next track → {track_id:?}"));
+
+                                    observed_track_id = Some(track_id);
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+
+                                    position_line_cleared_near_end = false;
+                                }
+
+                                Ok(None) => {
+                                    print_event("No next track in the queue.");
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+                                }
+
+                                Err(error) => {
+                                    print_event(format!("Could not start next track: {error}"));
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+                                }
+                            }
+                        }
+
+                        /* --------------------
+                         * PREVIOUS
+                         * --------------------
+                         */
+                        "b" | "previous" => {
+                            finish_position_line(position_line_width)?;
+
+                            match engine.previous_track(library) {
+                                Ok(Some(track_id)) => {
+                                    print_event(format!("Previous track → {track_id:?}"));
+
+                                    observed_track_id = Some(track_id);
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+
+                                    position_line_cleared_near_end = false;
+                                }
+
+                                Ok(None) => {
+                                    print_event("Already at the first track in the queue.");
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+                                }
+
+                                Err(error) => {
+                                    print_event(format!("Could not start previous track: {error}"));
+
+                                    position_line_width = 0;
+
+                                    last_position_second = None;
+                                }
+                            }
+                        }
+
+                        /* --------------------
+                         * SEEK LEFT
+                         * --------------------
+                         */
+                        "left" => {
+                            if let Err(error) = engine.seek_by_seconds(-5) {
+                                finish_position_line(position_line_width)?;
+
+                                print_event(format!("Seek failed: {error}"));
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+                            } else {
+                                finish_position_line(position_line_width)?;
+
+                                print_event("Seeked backward 5 seconds");
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+
+                                position_line_cleared_near_end = false;
+                            }
+                        }
+
+                        /* --------------------
+                         * SEEK RIGHT
+                         * --------------------
+                         */
+                        "right" => {
+                            if let Err(error) = engine.seek_by_seconds(5) {
+                                finish_position_line(position_line_width)?;
+
+                                print_event(format!("Seek failed: {error}"));
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+                            } else {
+                                finish_position_line(position_line_width)?;
+
+                                print_event("Seeked forward 5 seconds");
+
+                                position_line_width = 0;
+
+                                last_position_second = None;
+
+                                position_line_cleared_near_end = false;
+                            }
+                        }
+
+                        /* --------------------
+                         * STATUS
+                         * --------------------
+                         */
+                        "status" | "show" => {
+                            finish_position_line(position_line_width)?;
+
+                            if let Some(library) = library {
+                                if let Some(snapshot) = engine.playback_snapshot(Some(library)) {
+                                    print_track_details(library, &snapshot);
+                                } else {
+                                    print_event("Track details are unavailable.");
+                                }
+                            } else {
+                                print_event("Technical details are available in library playback.");
+                            }
+
+                            position_line_width = 0;
+
+                            last_position_second = None;
+                        }
+
+                        /* --------------------
+                         * STOP
+                         * --------------------
+                         */
+                        "s" | "stop" => {
+                            engine.stop();
+
+                            let position = format_time(engine.position());
+
+                            finish_position_line(position_line_width)?;
+
+                            print_event(format!("Playback stopped at {position}"));
+
+                            return engine.wait().map(|_| ());
+                        }
+
+                        /* --------------------
+                         * QUIT
+                         * --------------------
+                         */
+                        "q" | "quit" => {
+                            engine.stop();
+
+                            let position = format_time(engine.position());
+
+                            finish_position_line(position_line_width)?;
+
+                            print_event(format!("Playback quit at {position}"));
+
+                            return engine.wait().map(|_| ());
+                        }
+
+                        /* --------------------
+                         * UNKNOWN
+                         * --------------------
+                         */
+                        "" => {}
+
+                        _ => {
+                            finish_position_line(position_line_width)?;
+
+                            if engine.queue_enabled() {
+                                print_event(
+                                    "Unknown command. Use ←, →, p, r, n, b, c, status, s, or q.",
+                                );
+                            } else {
+                                print_event("Unknown command. Use ←, →, p, r, s, or q.");
+                            }
+
+                            position_line_width = 0;
+
                             last_position_second = None;
                         }
                     }
-                    "right" => {
-                        if let Err(error) = engine.seek_by_seconds(5) {
-                            clear_position_line(position_line_width)?;
-                            println!("Seek failed: {error}");
-                            position_line_width = 0;
-                            last_position_second = None;
-                        }
-                    }
-                    "s" | "stop" => {
-                        engine.stop();
-                        let position = format_time(engine.position());
-                        clear_position_line(position_line_width)?;
-                        println!("Playback stopped at {}.", position);
-                        return engine.wait();
-                    }
-                    "q" | "quit" => {
-                        engine.stop();
-                        let position = format_time(engine.position());
-                        clear_position_line(position_line_width)?;
-                        println!("Playback quit at {}.", position);
-                        return engine.wait();
-                    }
-                    "" => {}
-                    _ => {
-                        clear_position_line(position_line_width)?;
-                        println!("Unknown command. Use ←, →, p, r, s, or q.");
-                        position_line_width = 0;
-                        last_position_second = None;
-                    }
-                },
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+
+                Err(mpsc::TryRecvError::Empty) => {
+                    break;
+                }
+
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break;
+                }
             }
         }
 
-        if let Some(result) = engine.poll() {
-            println!();
-            return result;
-        }
+        /* ====================================================
+         * PLAYBACK STATE
+         * ====================================================
+         */
+
+        let duration = engine.total_duration();
 
         let position = engine.position();
-        if last_position_second != Some(position.as_secs()) {
-            let line = format_position(position, total_duration);
-            print!("\r{}", line);
+
+        let near_end = engine.queue_enabled()
+            && duration.is_some_and(|duration| {
+                position >= duration.saturating_sub(Duration::from_millis(100))
+            });
+
+        if near_end && !position_line_cleared_near_end {
+            finish_position_line(position_line_width)?;
+
+            position_line_width = 0;
+
+            last_position_second = None;
+
+            position_line_cleared_near_end = true;
+        }
+
+        /* ====================================================
+         * NATURAL END / STOP
+         * ====================================================
+         */
+
+        if let Some(result) = engine.poll(library) {
+            finish_position_line(position_line_width)?;
+
+            match &result {
+                Ok(PlaybackEndReason::Completed) => {
+                    print_event("Playback completed.");
+                }
+
+                Ok(PlaybackEndReason::Stopped) => {
+                    print_event("Playback stopped.");
+                }
+
+                Err(error) => {
+                    print_event(format!("Playback error: {error}"));
+                }
+            }
+
+            return result.map(|_| ());
+        }
+
+        /* ====================================================
+         * TRACK CHANGE
+         * ====================================================
+         */
+
+        let current_track_id = engine.current_track_id();
+
+        if current_track_id != observed_track_id {
+            finish_position_line(position_line_width)?;
+
+            if let Some(library) = library {
+                if let Some(snapshot) = engine.playback_snapshot(Some(library)) {
+                    print_event("Track changed.");
+
+                    println!();
+
+                    print_now_playing(library, &snapshot);
+
+                    println!();
+
+                    print_progress(&snapshot);
+
+                    println!();
+
+                    print_queue(library, &snapshot);
+
+                    println!();
+
+                    print_queue_position(library, &snapshot);
+
+                    println!();
+                }
+            }
+
+            observed_track_id = current_track_id;
+
+            position_line_width = 0;
+
+            last_position_second = None;
+
+            position_line_cleared_near_end = false;
+        }
+
+        /* ====================================================
+         * LIVE PROGRESS
+         * ====================================================
+         */
+
+        let position = engine.position();
+
+        if !position_line_cleared_near_end && last_position_second != Some(position.as_secs()) {
+            let line = format_progress_line(position, engine.total_duration());
+
+            print!(
+                "\r{line:<width$}",
+                width = position_line_width.max(line.chars().count(),)
+            );
+
             io::stdout().flush()?;
-            position_line_width = line.len();
+
+            position_line_width = line.chars().count();
+
             last_position_second = Some(position.as_secs());
         }
 
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/* ============================================================
+ * MAIN
+ * ============================================================
+ */
+
+#[derive(Debug, PartialEq, Eq)]
+enum LibraryPlayArguments {
+    All {
+        root: String,
+    },
+    Explicit {
+        root: String,
+        track_id: String,
+        queued_ids: Vec<String>,
+    },
+}
+
+fn parse_library_play_arguments(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LibraryPlayArguments, String> {
+    let mut args = args.into_iter();
+    let root = args
+        .next()
+        .ok_or_else(|| "library-play requires a directory path.".to_string())?;
+    let track_id = args
+        .next()
+        .ok_or_else(|| "library-play requires a TrackId or --all.".to_string())?;
+    let queued_ids = args.collect::<Vec<_>>();
+
+    if track_id == "--all" {
+        if !queued_ids.is_empty() {
+            return Err(
+                "--all must be used by itself after the directory; it cannot be combined with a TrackId or queued IDs."
+                    .to_string(),
+            );
+        }
+
+        return Ok(LibraryPlayArguments::All { root });
+    }
+
+    if queued_ids.iter().any(|queued_id| queued_id == "--all") {
+        return Err(
+            "--all must be used by itself after the directory; it cannot be combined with a TrackId or queued IDs."
+                .to_string(),
+        );
+    }
+
+    Ok(LibraryPlayArguments::Explicit {
+        root,
+        track_id,
+        queued_ids,
+    })
+}
+
+fn print_library_play_usage() {
+    println!("Usage:");
+    println!("  aurelis-app library-play <directory> <track-id> [queued-track-id ...]");
+    println!("  aurelis-app library-play <directory> --all");
+}
+
+fn is_unknown_library_command(command: &str) -> bool {
+    command.starts_with("library-") && std::path::Path::new(command).extension().is_none()
 }
 
 fn main() {
@@ -308,21 +1212,104 @@ fn main() {
         }
     };
 
+    /* ========================================================
+     * HELP
+     * ========================================================
+     */
+
     if first == "--help" || first == "-h" {
         print_usage();
         return;
     }
 
-    /*
-     * Metadata-only mode.
-     *
-     * Example:
-     *
-     * aurelis-app --info "song.flac"
-     *
-     * This reads metadata without opening
-     * the playback engine or playing audio.
+    if first == "library" {
+        let Some(root) = args.next() else {
+            eprintln!("Error: library requires a directory path.");
+            println!("Usage: aurelis-app library <directory>");
+            return;
+        };
+
+        library_browser::run(&root);
+        return;
+    }
+
+    /* ========================================================
+     * LIBRARY SEARCH & QUERY
+     * ========================================================
      */
+
+    if library_search::is_command_candidate(&first) {
+        match library_search::parse_command(&first, args.collect()) {
+            Ok(command) => library_search::run_command(command),
+            Err(message) => println!("Error: {message}"),
+        }
+        return;
+    }
+
+    /* ========================================================
+     * LIBRARY TEST
+     * ========================================================
+     */
+
+    if first == "library-test" {
+        let Some(root) = args.next() else {
+            eprintln!("Error: library-test requires a directory path.");
+
+            println!("Usage: aurelis-app library-test <directory>");
+
+            return;
+        };
+
+        if let Err(error) = library_test::run(&root) {
+            eprintln!("Library test failed: {error}");
+        }
+
+        return;
+    }
+
+    /* ========================================================
+     * LIBRARY PLAYBACK
+     * ========================================================
+     */
+
+    if first == "library-play" {
+        match parse_library_play_arguments(args) {
+            Ok(LibraryPlayArguments::All { root }) => {
+                if let Err(error) =
+                    library_play_test::run(&root, library_play_test::PlaySelection::All)
+                {
+                    eprintln!("Library playback failed: {error}");
+                }
+            }
+            Ok(LibraryPlayArguments::Explicit {
+                root,
+                track_id,
+                queued_ids,
+            }) => {
+                if let Err(error) = library_play_test::run(
+                    &root,
+                    library_play_test::PlaySelection::Explicit {
+                        starting_id: track_id,
+                        queued_ids,
+                    },
+                ) {
+                    eprintln!("Library playback failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("Error: {error}");
+                print_library_play_usage();
+            }
+        }
+
+        return;
+    }
+
+    /* ========================================================
+     * INFO
+     * ========================================================
+     */
+
     if first == "--info" {
         let path = match args.next() {
             Some(path) => path,
@@ -331,6 +1318,7 @@ fn main() {
                 eprintln!("Error: --info requires an audio file path.");
 
                 print_usage();
+
                 return;
             }
         };
@@ -342,6 +1330,7 @@ fn main() {
 
             Err(error) => {
                 eprintln!("Metadata error: {error}");
+
                 return;
             }
         };
@@ -351,13 +1340,16 @@ fn main() {
         return;
     }
 
-    /*
-     * Normal playback mode.
-     *
-     * Example:
-     *
-     * aurelis-app "song.flac"
+    if is_unknown_library_command(&first) {
+        println!("Error: unknown command '{first}'. Use --help to list available commands.");
+        return;
+    }
+
+    /* ========================================================
+     * DIRECT PLAYBACK
+     * ========================================================
      */
+
     let path = first;
 
     println!("Opening: {}\n", path);
@@ -367,6 +1359,7 @@ fn main() {
 
         Err(error) => {
             eprintln!("Metadata error: {error}");
+
             return;
         }
     };
@@ -376,6 +1369,7 @@ fn main() {
 
         Err(error) => {
             eprintln!("Failed to initialize playback: {error}");
+
             return;
         }
     };
@@ -383,6 +1377,7 @@ fn main() {
     let output = engine.output_spec();
 
     println!("Now Playing");
+
     println!("────────────────────────");
 
     print_field("Title", metadata.title.as_deref());
@@ -401,7 +1396,7 @@ fn main() {
         metadata
             .track
             .map(|n| n.to_string())
-            .unwrap_or_else(|| "-".to_string())
+            .unwrap_or_else(|| { "-".to_string() })
     );
 
     println!("{:<12}: {}", "Duration", metadata.duration_string());
@@ -417,9 +1412,12 @@ fn main() {
     );
 
     println!(
-        "{:<12}: {} Hz",
+        "{:<12}: {}",
         "Sample Rate",
-        metadata.sample_rate.unwrap_or(0)
+        metadata
+            .sample_rate
+            .map(|rate| { format!("{rate} Hz") })
+            .unwrap_or_else(|| { "Unknown".to_string() })
     );
 
     println!(
@@ -427,8 +1425,8 @@ fn main() {
         "Bit Depth",
         metadata
             .bit_depth
-            .map(|b| format!("{b}-bit"))
-            .unwrap_or_else(|| "Unknown".to_string())
+            .map(|b| { format!("{b}-bit") })
+            .unwrap_or_else(|| { "Unknown".to_string() })
     );
 
     println!(
@@ -436,8 +1434,8 @@ fn main() {
         "Channels",
         metadata
             .channels
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "Unknown".to_string())
+            .map(|c| { c.to_string() })
+            .unwrap_or_else(|| { "Unknown".to_string() })
     );
 
     println!();
@@ -471,10 +1469,114 @@ fn main() {
 
     if let Err(error) = engine.play() {
         eprintln!("Playback failed: {error}");
+
         return;
     }
 
-    if let Err(error) = run_playback_controls(&mut engine) {
+    if let Err(error) = run_playback_controls(&mut engine, None) {
         eprintln!("Playback failed: {error}");
+    }
+}
+
+/* ============================================================
+ * TESTS
+ * ============================================================
+ */
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::{format_progress_line, truncate_text};
+
+    use std::time::Duration;
+
+    #[test]
+    fn truncates_long_text() {
+        let text = "This is a very long title";
+
+        let result = truncate_text(text, 10);
+
+        assert_eq!(result, "This is...");
+    }
+
+    #[test]
+    fn keeps_short_text_unchanged() {
+        let text = "sample3";
+
+        assert_eq!(truncate_text(text, 20,), text);
+    }
+
+    #[test]
+    fn progress_line_contains_time_and_bar() {
+        let line = format_progress_line(Duration::from_secs(30), Some(Duration::from_secs(90)));
+
+        assert!(line.contains("00:30"));
+
+        assert!(line.contains("01:30"));
+
+        assert!(line.contains("━"));
+
+        assert!(line.contains("·"));
+    }
+}
+
+#[cfg(test)]
+mod library_play_argument_tests {
+    use super::{LibraryPlayArguments, is_unknown_library_command, parse_library_play_arguments};
+
+    fn parse(args: &[&str]) -> Result<LibraryPlayArguments, String> {
+        parse_library_play_arguments(args.iter().map(|argument| (*argument).to_string()))
+    }
+
+    #[test]
+    fn unknown_library_commands_do_not_fall_through_to_file_playback() {
+        assert!(is_unknown_library_command("library-search-paly"));
+        assert!(!is_unknown_library_command("library-song.flac"));
+        assert!(!is_unknown_library_command("C:/Music/song.flac"));
+    }
+
+    #[test]
+    fn accepts_all_tracks_without_explicit_ids() {
+        assert_eq!(
+            parse(&["C:/Music", "--all"]),
+            Ok(LibraryPlayArguments::All {
+                root: "C:/Music".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_start_and_queued_ids() {
+        assert_eq!(
+            parse(&["C:/Music", "6", "1", "8"]),
+            Ok(LibraryPlayArguments::Explicit {
+                root: "C:/Music".to_string(),
+                track_id: "6".to_string(),
+                queued_ids: vec!["1".to_string(), "8".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_missing_directory_or_selection() {
+        assert!(parse(&[]).unwrap_err().contains("directory path"));
+        assert!(
+            parse(&["C:/Music"])
+                .unwrap_err()
+                .contains("TrackId or --all")
+        );
+    }
+
+    #[test]
+    fn rejects_all_combined_with_explicit_or_queued_ids() {
+        for args in [
+            &["C:/Music", "--all", "1"][..],
+            &["C:/Music", "1", "--all"][..],
+        ] {
+            assert!(
+                parse(args)
+                    .unwrap_err()
+                    .contains("--all must be used by itself")
+            );
+        }
     }
 }

@@ -21,6 +21,15 @@ pub enum PlaybackState {
     Paused,
 }
 
+/// Why a playback worker stopped producing audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackEndReason {
+    /// The decoder reached the end of the track.
+    Completed,
+    /// Playback was stopped by a caller or shutdown request.
+    Stopped,
+}
+
 enum WorkerResult {
     Completed,
     Stopped,
@@ -268,19 +277,25 @@ impl PlaybackEngine {
     /// Returns Some(result) when playback has
     /// completed or stopped.
     pub fn poll(&mut self) -> Option<Result<(), Box<dyn Error>>> {
-        let result = self.poll_worker();
+        self.poll_end().map(|result| {
+            result.map(|reason| {
+                if reason == PlaybackEndReason::Completed {
+                    println!("Playback complete.");
+                }
+            })
+        })
+    }
 
-        match result {
-            Some(WorkerResult::Completed) => {
-                println!("Playback complete.");
-
-                Some(Ok(()))
-            }
-
-            Some(WorkerResult::Stopped) => Some(Ok(())),
-
+    /// Check whether the worker has finished and preserve the reason.
+    ///
+    /// This is useful to application code that needs to distinguish natural
+    /// end-of-track from a manual stop. The older `poll()` API remains
+    /// available for callers that only need completion/error notification.
+    pub fn poll_end(&mut self) -> Option<Result<PlaybackEndReason, Box<dyn Error>>> {
+        match self.poll_worker() {
+            Some(WorkerResult::Completed) => Some(Ok(PlaybackEndReason::Completed)),
+            Some(WorkerResult::Stopped) => Some(Ok(PlaybackEndReason::Stopped)),
             Some(WorkerResult::Failed(error)) => Some(Err(error.into())),
-
             None => None,
         }
     }
@@ -382,10 +397,20 @@ impl PlaybackEngine {
     /// This is retained for callers that want
     /// the old blocking behavior.
     pub fn wait(&mut self) -> Result<(), Box<dyn Error>> {
+        match self.wait_end()? {
+            PlaybackEndReason::Completed => println!("Playback complete."),
+            PlaybackEndReason::Stopped => {}
+        }
+
+        Ok(())
+    }
+
+    /// Wait for playback to finish and return why the worker ended.
+    pub fn wait_end(&mut self) -> Result<PlaybackEndReason, Box<dyn Error>> {
         let worker = match self.worker.as_mut() {
             Some(worker) => worker,
 
-            None => return Ok(()),
+            None => return Ok(PlaybackEndReason::Stopped),
         };
 
         let result = worker.wait()?;
@@ -395,13 +420,9 @@ impl PlaybackEngine {
         self.state = PlaybackState::Stopped;
 
         match result {
-            WorkerResult::Completed => {
-                println!("Playback complete.");
+            WorkerResult::Completed => Ok(PlaybackEndReason::Completed),
 
-                Ok(())
-            }
-
-            WorkerResult::Stopped => Ok(()),
+            WorkerResult::Stopped => Ok(PlaybackEndReason::Stopped),
 
             WorkerResult::Failed(error) => Err(error.into()),
         }
