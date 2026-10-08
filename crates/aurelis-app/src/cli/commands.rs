@@ -76,8 +76,9 @@ fn print_usage() {
     println!("  library-query <directory> <query-options>");
     println!("  library-query-play <directory> <result-number> <query-options>");
     println!("  library-query-play-all <directory> <query-options>");
-    println!("  Options: --search, --artist, --album, --genre, --year, --sort, --order");
-    println!("  Sort keys: title, artist, album, year, track, duration, path");
+    println!("  Options: --search, --artist, --album-artist, --album, --genre, --year");
+    println!("           --min-duration, --max-duration, --sort, --order");
+    println!("  Sort keys: title, artist, album, year, track, disc, duration, path");
     println!("  Sort order: asc or desc (default: title ascending)");
     println!();
     println!("INFORMATION");

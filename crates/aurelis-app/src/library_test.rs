@@ -245,6 +245,7 @@ fn parse_sort(argument: &str) -> Result<(SortKey, SortOrder, String), String> {
         "album" => (SortKey::Album, "Album"),
         "year" => (SortKey::Year, "Year"),
         "track" => (SortKey::TrackNumber, "Track"),
+        "disc" => (SortKey::DiscNumber, "Disc"),
         "duration" => (SortKey::Duration, "Duration"),
         "path" => (SortKey::Path, "Path"),
         _ => {

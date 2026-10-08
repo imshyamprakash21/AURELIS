@@ -1,6 +1,6 @@
 //! Search, query, result selection, and query-based playback CLI workflows.
 
-use std::{fmt::Write as _, io::ErrorKind, path::Path};
+use std::{fmt::Write as _, io::ErrorKind, path::Path, time::Duration};
 
 use aurelis_core::library::{
     MusicLibrary, ScanIssue, ScanReport, SortKey, SortOrder, Track, TrackId, TrackQuery,
@@ -48,9 +48,12 @@ pub(super) enum SearchCommand {
 pub(super) struct QueryOptions {
     search: Option<String>,
     artist: Option<String>,
+    album_artist: Option<String>,
     album: Option<String>,
     genre: Option<String>,
     year: Option<String>,
+    min_duration: Option<Duration>,
+    max_duration: Option<Duration>,
     sort_key: Option<SortKey>,
     sort_order: Option<SortOrder>,
 }
@@ -172,9 +175,20 @@ impl QueryOptions {
             match option {
                 "--search" => set_once(&mut options.search, value.clone(), option)?,
                 "--artist" => set_once(&mut options.artist, value.clone(), option)?,
+                "--album-artist" => set_once(&mut options.album_artist, value.clone(), option)?,
                 "--album" => set_once(&mut options.album, value.clone(), option)?,
                 "--genre" => set_once(&mut options.genre, value.clone(), option)?,
                 "--year" => set_once(&mut options.year, value.clone(), option)?,
+                "--min-duration" => set_once(
+                    &mut options.min_duration,
+                    parse_duration_seconds(value, option)?,
+                    option,
+                )?,
+                "--max-duration" => set_once(
+                    &mut options.max_duration,
+                    parse_duration_seconds(value, option)?,
+                    option,
+                )?,
                 "--sort" => set_once(&mut options.sort_key, parse_sort_key(value)?, option)?,
                 "--order" => set_once(&mut options.sort_order, parse_sort_order(value)?, option)?,
                 _ => {
@@ -185,6 +199,12 @@ impl QueryOptions {
             }
 
             index += 1;
+        }
+
+        if let (Some(minimum), Some(maximum)) = (options.min_duration, options.max_duration)
+            && minimum > maximum
+        {
+            return Err("--min-duration cannot exceed --max-duration.".to_owned());
         }
 
         Ok(options)
@@ -199,6 +219,9 @@ impl QueryOptions {
         if let Some(artist) = &self.artist {
             query = query.artist(artist);
         }
+        if let Some(artist) = &self.album_artist {
+            query = query.album_artist(artist);
+        }
         if let Some(album) = &self.album {
             query = query.album(album);
         }
@@ -207,6 +230,12 @@ impl QueryOptions {
         }
         if let Some(year) = &self.year {
             query = query.year(year);
+        }
+        if let Some(minimum) = self.min_duration {
+            query = query.min_duration(minimum);
+        }
+        if let Some(maximum) = self.max_duration {
+            query = query.max_duration(maximum);
         }
         if let Some(sort_key) = self.sort_key {
             query = query.sort_by(sort_key);
@@ -227,6 +256,9 @@ impl QueryOptions {
         if let Some(artist) = &self.artist {
             parts.push(format!("artist: {artist}"));
         }
+        if let Some(artist) = &self.album_artist {
+            parts.push(format!("album artist: {artist}"));
+        }
         if let Some(album) = &self.album {
             parts.push(format!("album: {album}"));
         }
@@ -235,6 +267,12 @@ impl QueryOptions {
         }
         if let Some(year) = &self.year {
             parts.push(format!("year: {year}"));
+        }
+        if let Some(minimum) = self.min_duration {
+            parts.push(format!("min duration: {}s", minimum.as_secs()));
+        }
+        if let Some(maximum) = self.max_duration {
+            parts.push(format!("max duration: {}s", maximum.as_secs()));
         }
         if let Some(sort_key) = self.sort_key {
             parts.push(format!("sort: {}", sort_key_label(sort_key)));
@@ -253,7 +291,7 @@ impl QueryOptions {
     }
 }
 
-const QUERY_OPTIONS_USAGE: &str = "Options: --search <text> --artist <name> --album <name> --genre <name> --year <year> --sort <title|artist|album|year|track|duration|path> --order <asc|desc>";
+const QUERY_OPTIONS_USAGE: &str = "Options: --search <text> --artist <name> --album-artist <name> --album <name> --genre <name> --year <year> --min-duration <seconds> --max-duration <seconds> --sort <title|artist|album|year|track|disc|duration|path> --order <asc|desc>";
 
 fn set_once<T>(slot: &mut Option<T>, value: T, option: &str) -> Result<(), String> {
     if slot.is_some() {
@@ -270,12 +308,20 @@ fn parse_sort_key(value: &str) -> Result<SortKey, String> {
         "album" => Ok(SortKey::Album),
         "year" => Ok(SortKey::Year),
         "track" => Ok(SortKey::TrackNumber),
+        "disc" => Ok(SortKey::DiscNumber),
         "duration" => Ok(SortKey::Duration),
         "path" => Ok(SortKey::Path),
         _ => Err(format!(
-            "Unknown sort key '{value}'. Use title, artist, album, year, track, duration, or path."
+            "Unknown sort key '{value}'. Use title, artist, album, year, track, disc, duration, or path."
         )),
     }
+}
+
+fn parse_duration_seconds(value: &str, option: &str) -> Result<Duration, String> {
+    value
+        .parse::<u64>()
+        .map(Duration::from_secs)
+        .map_err(|_| format!("Invalid value for {option}: '{value}'. Enter whole seconds."))
 }
 
 fn parse_sort_order(value: &str) -> Result<SortOrder, String> {
@@ -293,6 +339,7 @@ fn sort_key_label(sort_key: SortKey) -> &'static str {
         SortKey::Album => "album",
         SortKey::Year => "year",
         SortKey::TrackNumber => "track",
+        SortKey::DiscNumber => "disc",
         SortKey::Duration => "duration",
         SortKey::Path => "path",
     }
@@ -626,7 +673,7 @@ fn push_search_row(output: &mut String, number: &str, title: &str, artist: &str,
 mod tests {
     use super::*;
     use aurelis_core::audio::AudioMetadata;
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
     use unicode_width::UnicodeWidthStr;
 
     fn test_library() -> (MusicLibrary, TrackId, TrackId, TrackId) {
@@ -806,12 +853,52 @@ mod tests {
     #[test]
     fn supports_every_track_query_sort_key() {
         for sort in [
-            "title", "artist", "album", "year", "track", "duration", "path",
+            "title", "artist", "album", "year", "track", "disc", "duration", "path",
         ] {
             assert!(parse_options(&["--sort", sort]).is_ok(), "{sort}");
         }
         assert!(parse_options(&["--sort", "rating"]).is_err());
         assert!(parse_options(&["--order", "random"]).is_err());
+    }
+
+    #[test]
+    fn parses_album_artist_duration_bounds_and_disc_sort() {
+        let options = parse_options(&[
+            "--album-artist",
+            "Various Artists",
+            "--min-duration",
+            "60",
+            "--max-duration",
+            "180",
+            "--sort",
+            "disc",
+        ])
+        .unwrap();
+
+        assert_eq!(options.album_artist.as_deref(), Some("Various Artists"));
+        assert_eq!(options.min_duration, Some(Duration::from_secs(60)));
+        assert_eq!(options.max_duration, Some(Duration::from_secs(180)));
+        assert_eq!(options.sort_key, Some(SortKey::DiscNumber));
+        assert_eq!(
+            options.description(),
+            "album artist: Various Artists, min duration: 60s, max duration: 180s, sort: disc"
+        );
+
+        let mut library = MusicLibrary::new();
+        let id = library.add_track(
+            "music/compilation/song.flac",
+            AudioMetadata {
+                artist: Some("Guest Singer".to_owned()),
+                album_artist: Some("Various Artists".to_owned()),
+                duration: Some(Duration::from_secs(120)),
+                disc: Some(2),
+                ..AudioMetadata::default()
+            },
+        );
+        assert_eq!(result_ids(&library, &options.to_track_query()), [id]);
+
+        assert!(parse_options(&["--min-duration", "181", "--max-duration", "180"]).is_err());
+        assert!(parse_options(&["--min-duration", "one minute"]).is_err());
     }
 
     #[test]

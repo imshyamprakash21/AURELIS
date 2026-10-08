@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Duration};
 
 use super::Track;
 
@@ -16,6 +16,8 @@ pub enum SortKey {
     Year,
     /// The metadata track number.
     TrackNumber,
+    /// Disc number, then track number within each disc.
+    DiscNumber,
     /// Track duration.
     Duration,
     /// Stored path, compared lexicographically by the platform's `Path` order.
@@ -39,16 +41,20 @@ pub enum SortOrder {
 /// substring matching over title, artist, album, album artist, and genre
 /// metadata. Search also checks the existing title, artist, and album display
 /// fallbacks. No fuzzy matching or ranking is performed. Text sort keys are
-/// compared by lowercase value. For optional year, track number, and duration,
-/// `None` sorts before `Some` in ascending order and after `Some` in descending
-/// order. Equal sort values are always ordered by ascending `TrackId`.
+/// compared by lowercase value. For optional year, track number, disc number,
+/// and duration, `None` sorts before `Some` in ascending order and after
+/// `Some` in descending order. Duration bounds are inclusive and exclude
+/// tracks with unknown duration. Equal sort values use ascending `TrackId`.
 #[derive(Clone, Debug, Default)]
 pub struct TrackQuery {
     search: Option<String>,
     artist: Option<String>,
+    album_artist: Option<String>,
     album: Option<String>,
     genre: Option<String>,
     year: Option<String>,
+    min_duration: Option<Duration>,
+    max_duration: Option<Duration>,
     sort_key: SortKey,
     sort_order: SortOrder,
 }
@@ -74,6 +80,15 @@ impl TrackQuery {
         self
     }
 
+    /// Require an exact, case-insensitive effective album-artist match.
+    ///
+    /// Uses the album-artist tag first, then the track artist and path
+    /// fallbacks used by [`Track::display_album_artist`].
+    pub fn album_artist(mut self, artist: impl AsRef<str>) -> Self {
+        self.album_artist = Some(normalize(artist.as_ref()));
+        self
+    }
+
     /// Require an exact, case-insensitive album match.
     ///
     /// Uses the track's display album, including its existing path fallback
@@ -96,6 +111,18 @@ impl TrackQuery {
     /// the year filter `2024`.
     pub fn year(mut self, year: impl ToString) -> Self {
         self.year = Some(normalize(&year.to_string()));
+        self
+    }
+
+    /// Require a known duration at least this long.
+    pub fn min_duration(mut self, duration: Duration) -> Self {
+        self.min_duration = Some(duration);
+        self
+    }
+
+    /// Require a known duration no longer than this value.
+    pub fn max_duration(mut self, duration: Duration) -> Self {
+        self.max_duration = Some(duration);
         self
     }
 
@@ -134,6 +161,10 @@ fn matches(track: &Track, query: &TrackQuery) -> bool {
             .as_deref()
             .is_none_or(|artist| normalize(&track.display_artist()) == artist)
         && query
+            .album_artist
+            .as_deref()
+            .is_none_or(|artist| normalize(&track.display_album_artist()) == artist)
+        && query
             .album
             .as_deref()
             .is_none_or(|album| normalize(&track.display_album()) == album)
@@ -148,6 +179,16 @@ fn matches(track: &Track, query: &TrackQuery) -> bool {
                 .year
                 .as_deref()
                 .is_some_and(|value| normalize(value) == year)
+        })
+        && query.min_duration.is_none_or(|minimum| {
+            metadata
+                .duration
+                .is_some_and(|duration| duration >= minimum)
+        })
+        && query.max_duration.is_none_or(|maximum| {
+            metadata
+                .duration
+                .is_some_and(|duration| duration <= maximum)
         })
 }
 
@@ -178,6 +219,8 @@ fn compare_tracks(left: &Track, right: &Track, query: &TrackQuery) -> Ordering {
             right.metadata().year.as_deref(),
         ),
         SortKey::TrackNumber => compare_optional(&left.metadata().track, &right.metadata().track),
+        SortKey::DiscNumber => compare_optional(&left.metadata().disc, &right.metadata().disc)
+            .then_with(|| compare_optional(&left.metadata().track, &right.metadata().track)),
         SortKey::Duration => {
             compare_optional(&left.metadata().duration, &right.metadata().duration)
         }
@@ -560,6 +603,80 @@ mod tests {
     }
 
     #[test]
+    fn album_artist_and_inclusive_duration_bounds_combine() {
+        let mut library = MusicLibrary::new();
+        add_track(
+            &mut library,
+            "minimum.wav",
+            metadata(
+                Some("At minimum"),
+                Some("Guest A"),
+                Some("Compilation"),
+                Some("Various Artists"),
+                None,
+                None,
+                None,
+                Some(60),
+            ),
+        );
+        add_track(
+            &mut library,
+            "maximum.wav",
+            metadata(
+                Some("At maximum"),
+                Some("Guest B"),
+                Some("Compilation"),
+                Some("Various Artists"),
+                None,
+                None,
+                None,
+                Some(180),
+            ),
+        );
+        add_track(
+            &mut library,
+            "wrong-artist.wav",
+            metadata(
+                Some("Other album artist"),
+                Some("Guest C"),
+                Some("Compilation"),
+                Some("Another Artist"),
+                None,
+                None,
+                None,
+                Some(90),
+            ),
+        );
+        add_track(
+            &mut library,
+            "unknown-duration.wav",
+            metadata(
+                Some("Unknown duration"),
+                Some("Guest D"),
+                Some("Compilation"),
+                Some("Various Artists"),
+                None,
+                None,
+                None,
+                None,
+            ),
+        );
+
+        let query = TrackQuery::new()
+            .album_artist("various artists")
+            .min_duration(Duration::from_secs(60))
+            .max_duration(Duration::from_secs(180))
+            .sort_by(SortKey::Duration);
+
+        assert_eq!(query_titles(&library, &query), ["At minimum", "At maximum"]);
+        assert!(
+            library
+                .query(&TrackQuery::new().album_artist("Guest A"))
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn filters_combine_with_and_semantics() {
         let mut library = MusicLibrary::new();
         add_track(
@@ -696,6 +813,60 @@ mod tests {
                 "unexpected order for {sort_key:?}"
             );
         }
+    }
+
+    #[test]
+    fn disc_sort_orders_by_disc_then_track_and_places_missing_values_first() {
+        let mut library = MusicLibrary::new();
+        add_track(
+            &mut library,
+            "disc-two.wav",
+            AudioMetadata {
+                title: Some("Disc Two".to_owned()),
+                disc: Some(2),
+                track: Some(1),
+                ..AudioMetadata::default()
+            },
+        );
+        add_track(
+            &mut library,
+            "disc-one-track-two.wav",
+            AudioMetadata {
+                title: Some("Disc One Track Two".to_owned()),
+                disc: Some(1),
+                track: Some(2),
+                ..AudioMetadata::default()
+            },
+        );
+        add_track(
+            &mut library,
+            "disc-one-track-one.wav",
+            AudioMetadata {
+                title: Some("Disc One Track One".to_owned()),
+                disc: Some(1),
+                track: Some(1),
+                ..AudioMetadata::default()
+            },
+        );
+        add_track(
+            &mut library,
+            "unknown-disc.wav",
+            AudioMetadata {
+                title: Some("Unknown Disc".to_owned()),
+                track: Some(1),
+                ..AudioMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            query_titles(&library, &TrackQuery::new().sort_by(SortKey::DiscNumber)),
+            [
+                "Unknown Disc",
+                "Disc One Track One",
+                "Disc One Track Two",
+                "Disc Two"
+            ]
+        );
     }
 
     #[test]
