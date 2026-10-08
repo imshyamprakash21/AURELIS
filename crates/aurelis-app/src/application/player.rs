@@ -11,13 +11,13 @@ use aurelis_core::{
 };
 
 use crate::{
+    input::start_control_reader,
     player_controller::PlaybackControlTarget,
     presentation::player::{
         finish_position_line, format_progress_line, format_time, print_controls, print_event,
         print_field, print_now_playing, print_player_screen, print_progress, print_queue,
         print_queue_position, print_track_details,
     },
-    start_control_reader,
 };
 
 pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
