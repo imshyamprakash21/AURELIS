@@ -4,7 +4,7 @@ use std::{error::Error, path::Path};
 
 use aurelis_core::library::{MusicLibrary, ScanIssue, Track, TrackId};
 
-use crate::{player_controller::PlayerController, run_playback_controls};
+use crate::{application::player::run_playback_controls, player_controller::PlayerController};
 
 pub(super) enum PlaySelection {
     All,

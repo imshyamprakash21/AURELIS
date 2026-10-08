@@ -3,8 +3,8 @@ use std::env;
 use aurelis_core::audio::AudioMetadata;
 
 use crate::{
-    library_browser, library_play_test, library_search, library_test, print_metadata, print_usage,
-    run_direct_playback,
+    application::player::run_direct_playback, library_browser, library_play_test, library_search,
+    library_test, print_metadata, print_usage,
 };
 
 #[derive(Debug, PartialEq, Eq)]

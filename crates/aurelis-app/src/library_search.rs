@@ -8,7 +8,8 @@ use aurelis_core::library::{
 
 use crate::presentation::player::{BOX_INNER, display_width, pad_text_right, truncate_text};
 use crate::{
-    library_browser::push_table_border, player_controller::PlayerController, run_playback_controls,
+    application::player::run_playback_controls, library_browser::push_table_border,
+    player_controller::PlayerController,
 };
 
 const SEARCH_COLUMN_WIDTHS: [usize; 4] = [4, 24, 18, 13];
