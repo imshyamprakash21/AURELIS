@@ -1,5 +1,6 @@
 mod artwork;
 mod grouping;
+mod lyrics;
 mod persistence;
 mod playlist;
 mod query;
@@ -8,6 +9,7 @@ mod track;
 
 pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
 pub use grouping::{Album, Artist};
+pub use lyrics::{Lyrics, LyricsError, SyncedLyricLine, load_lyrics_for_track};
 pub use playlist::{Playlist, PlaylistCollection, PlaylistError, PlaylistId, PlaylistTrack};
 pub use query::{SortKey, SortOrder, TrackQuery};
 pub use scanner::{DiscoveryIssue, DiscoveryResult, is_supported_audio_file, scan_directory};
