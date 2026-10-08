@@ -12,13 +12,10 @@ use symphonia::default::{get_codecs, get_probe};
 
 use super::types::{AudioSpec, PcmBuffer};
 
-pub fn decode_file<P: AsRef<Path>>(
-    path: P,
-) -> Result<PcmBuffer, Box<dyn std::error::Error>> {
+pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<PcmBuffer, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
 
-    let media_source =
-        MediaSourceStream::new(Box::new(file), Default::default());
+    let media_source = MediaSourceStream::new(Box::new(file), Default::default());
 
     let hint = Hint::new();
 
@@ -31,27 +28,21 @@ pub fn decode_file<P: AsRef<Path>>(
 
     let mut format = probed.format;
 
-    let track = format
-        .default_track()
-        .ok_or("No audio track found")?;
+    let track = format.default_track().ok_or("No audio track found")?;
 
     let track_id = track.id;
     let codec_params = track.codec_params.clone();
 
-    let mut decoder =
-        get_codecs().make(&codec_params, &DecoderOptions::default())?;
+    let mut decoder = get_codecs().make(&codec_params, &DecoderOptions::default())?;
 
-    let initial_sample_rate = codec_params
-        .sample_rate
-        .ok_or("Missing sample rate")?;
+    let initial_sample_rate = codec_params.sample_rate.ok_or("Missing sample rate")?;
 
     let initial_channels = codec_params
         .channels
         .ok_or("Missing channel information")?
         .count();
 
-    let mut spec =
-        AudioSpec::new(initial_sample_rate, initial_channels);
+    let mut spec = AudioSpec::new(initial_sample_rate, initial_channels);
 
     let mut samples = Vec::new();
 
@@ -80,15 +71,11 @@ pub fn decode_file<P: AsRef<Path>>(
 
         let decoded_spec = *decoded.spec();
 
-        spec = AudioSpec::new(
-            decoded_spec.rate,
-            decoded_spec.channels.count(),
-        );
+        spec = AudioSpec::new(decoded_spec.rate, decoded_spec.channels.count());
 
         let duration = decoded.capacity() as u64;
 
-        let mut buffer =
-            SampleBuffer::<f32>::new(duration, decoded_spec);
+        let mut buffer = SampleBuffer::<f32>::new(duration, decoded_spec);
 
         buffer.copy_interleaved_ref(decoded);
 

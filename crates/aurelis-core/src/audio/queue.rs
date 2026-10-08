@@ -87,10 +87,7 @@ mod tests {
 
         queue.push("song1.flac");
 
-        assert_eq!(
-            queue.peek().unwrap(),
-            Path::new("song1.flac")
-        );
+        assert_eq!(queue.peek().unwrap(), Path::new("song1.flac"));
 
         assert_eq!(queue.len(), 1);
     }
@@ -103,18 +100,9 @@ mod tests {
         queue.push("song2.mp3");
         queue.push("song3.ogg");
 
-        assert_eq!(
-            queue.pop().unwrap(),
-            PathBuf::from("song1.flac")
-        );
-        assert_eq!(
-            queue.pop().unwrap(),
-            PathBuf::from("song2.mp3")
-        );
-        assert_eq!(
-            queue.pop().unwrap(),
-            PathBuf::from("song3.ogg")
-        );
+        assert_eq!(queue.pop().unwrap(), PathBuf::from("song1.flac"));
+        assert_eq!(queue.pop().unwrap(), PathBuf::from("song2.mp3"));
+        assert_eq!(queue.pop().unwrap(), PathBuf::from("song3.ogg"));
 
         assert!(queue.pop().is_none());
     }
