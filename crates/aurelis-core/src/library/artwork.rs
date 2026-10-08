@@ -109,6 +109,7 @@ impl Artwork {
 #[derive(Debug, Default)]
 pub struct ArtworkCache {
     by_track: HashMap<PathBuf, Option<Arc<Artwork>>>,
+    by_directory: HashMap<PathBuf, Vec<PathBuf>>,
     by_external_file: HashMap<PathBuf, Option<Arc<Artwork>>>,
 }
 
@@ -126,7 +127,7 @@ impl ArtworkCache {
         }
 
         let mut artwork = None;
-        for image_path in external_artwork_paths(&track_path) {
+        for image_path in self.external_artwork_paths(&track_path) {
             if let Some(found) = self.external_artwork(&image_path) {
                 artwork = Some(found);
                 break;
@@ -144,7 +145,22 @@ impl ArtworkCache {
     /// Forget cached artwork and cached misses.
     pub fn clear(&mut self) {
         self.by_track.clear();
+        self.by_directory.clear();
         self.by_external_file.clear();
+    }
+
+    fn external_artwork_paths(&mut self, track_path: &Path) -> Vec<PathBuf> {
+        let Some(directory) = track_path.parent() else {
+            return Vec::new();
+        };
+        if let Some(paths) = self.by_directory.get(directory) {
+            return paths.clone();
+        }
+
+        let paths = external_artwork_paths(track_path);
+        self.by_directory
+            .insert(directory.to_path_buf(), paths.clone());
+        paths
     }
 
     fn external_artwork(&mut self, path: &Path) -> Option<Arc<Artwork>> {
@@ -531,5 +547,25 @@ mod tests {
 
         cache.clear();
         assert!(cache.get_for_track(&track).is_some());
+    }
+
+    #[test]
+    fn cache_reuses_folder_discovery_until_cleared() {
+        let directory = TemporaryDirectory::new();
+        let first_path = directory.path().join("first.flac");
+        let second_path = directory.path().join("second.flac");
+        fs::write(&first_path, b"not an audio file").expect("write first fake track");
+        fs::write(&second_path, b"not an audio file").expect("write second fake track");
+
+        let first_track = track(&first_path);
+        let second_track = track(&second_path);
+        let mut cache = ArtworkCache::new();
+        assert!(cache.get_for_track(&first_track).is_none());
+
+        fs::write(directory.path().join("cover.jpg"), jpeg_bytes()).expect("add artwork");
+        assert!(cache.get_for_track(&second_track).is_none());
+
+        cache.clear();
+        assert!(cache.get_for_track(&second_track).is_some());
     }
 }
