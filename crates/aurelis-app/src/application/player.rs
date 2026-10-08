@@ -6,7 +6,7 @@ use std::{
 };
 
 use aurelis_core::{
-    audio::{AudioMetadata, PlaybackEndReason, PlaybackEngine},
+    audio::{PlaybackEndReason, PlaybackEngine},
     library::MusicLibrary,
 };
 
@@ -459,25 +459,16 @@ pub(crate) fn run_direct_playback(first: String) {
 
     println!("Opening: {}\n", path);
 
-    let metadata = match AudioMetadata::from_file(&path) {
-        Ok(meta) => meta,
-
-        Err(error) => {
-            eprintln!("Metadata error: {error}");
-
-            return;
-        }
-    };
-
     let mut engine = match PlaybackEngine::open(&path) {
         Ok(engine) => engine,
 
         Err(error) => {
-            eprintln!("Failed to initialize playback: {error}");
+            eprintln!("Failed to initialize playback for '{path}': {error}");
 
             return;
         }
     };
+    let metadata = engine.metadata().clone();
 
     let output = engine.output_spec();
 
