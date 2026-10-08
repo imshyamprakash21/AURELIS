@@ -4,7 +4,9 @@ use std::{fmt::Write as _, io::ErrorKind, path::Path};
 
 use aurelis_core::library::{DiscoveryIssue, MusicLibrary, ScanIssue, ScanReport};
 
-use super::{BOX_INNER, display_width, pad_text_left, pad_text_right, truncate_text};
+use crate::presentation::player::{
+    BOX_INNER, display_width, pad_text_left, pad_text_right, truncate_text,
+};
 
 const ID_WIDTH: usize = 12;
 const TITLE_WIDTH: usize = 22;

@@ -6,9 +6,9 @@ use aurelis_core::library::{
     MusicLibrary, ScanIssue, ScanReport, SortKey, SortOrder, Track, TrackId, TrackQuery,
 };
 
+use crate::presentation::player::{BOX_INNER, display_width, pad_text_right, truncate_text};
 use crate::{
-    BOX_INNER, display_width, library_browser::push_table_border, pad_text_right,
-    player_controller::PlayerController, run_playback_controls, truncate_text,
+    library_browser::push_table_border, player_controller::PlayerController, run_playback_controls,
 };
 
 const SEARCH_COLUMN_WIDTHS: [usize; 4] = [4, 24, 18, 13];
