@@ -1,11 +1,13 @@
+mod components;
+mod theme;
 mod ui;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1320.0, 840.0])
-            .with_min_inner_size([900.0, 620.0]),
+            .with_inner_size(theme::window::INITIAL_SIZE)
+            .with_min_inner_size(theme::window::MINIMUM_SIZE),
         ..Default::default()
     };
 

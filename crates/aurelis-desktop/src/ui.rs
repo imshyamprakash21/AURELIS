@@ -4,42 +4,21 @@ use std::{
     time::Duration,
 };
 
+use crate::components::{
+    BannerMessage, MessageTone, artwork_fallback, draw_message, empty_state, format_time,
+    metadata_row, navigation_button, section_heading, track_row,
+};
+use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
     ArtworkImageFormat, ArtworkView, DesktopApplication, DesktopPlaybackState, LibraryScanSummary,
-    PlaybackView, TrackId, TrackSummary,
+    PlaybackView, TrackId,
 };
-use eframe::egui::{
-    self, Align, Align2, Color32, ColorImage, FontId, Frame, Layout, RichText, Sense, Stroke, Vec2,
-};
-
-const CANVAS: Color32 = Color32::from_rgb(12, 14, 20);
-const SIDEBAR: Color32 = Color32::from_rgb(16, 18, 26);
-const SURFACE: Color32 = Color32::from_rgb(22, 25, 34);
-const SURFACE_HOVER: Color32 = Color32::from_rgb(31, 35, 47);
-const EDGE: Color32 = Color32::from_rgb(44, 49, 64);
-const TEXT: Color32 = Color32::from_rgb(236, 239, 246);
-const MUTED: Color32 = Color32::from_rgb(147, 155, 174);
-const ACCENT: Color32 = Color32::from_rgb(151, 164, 255);
-const ACCENT_DARK: Color32 = Color32::from_rgb(59, 69, 121);
-const ERROR: Color32 = Color32::from_rgb(245, 136, 139);
-const SUCCESS: Color32 = Color32::from_rgb(126, 210, 174);
+use eframe::egui::{self, Align, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
     Library,
     NowPlaying,
-}
-
-#[derive(Clone, Copy)]
-enum MessageTone {
-    Info,
-    Success,
-    Error,
-}
-
-struct BannerMessage {
-    text: String,
-    tone: MessageTone,
 }
 
 struct DecodedArtwork {
@@ -289,22 +268,41 @@ impl AurelisDesktop {
     }
 
     fn draw_navigation(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
+        ui.add_space(spacing::GAP_8);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("A").size(30.0).strong().color(ACCENT));
+            ui.label(
+                RichText::new("A")
+                    .size(typography::BRAND_MARK)
+                    .strong()
+                    .color(ACCENT),
+            );
             ui.vertical(|ui| {
-                ui.label(RichText::new("AURELIS").size(18.0).strong().color(TEXT));
-                ui.label(RichText::new("LOCAL AUDIO").size(10.0).color(MUTED));
+                ui.label(
+                    RichText::new("AURELIS")
+                        .size(typography::TITLE)
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.label(
+                    RichText::new("LOCAL AUDIO")
+                        .size(typography::OVERLINE)
+                        .color(MUTED),
+                );
             });
         });
 
-        ui.add_space(42.0);
-        ui.label(RichText::new("YOUR SPACE").size(10.0).strong().color(MUTED));
-        ui.add_space(10.0);
+        ui.add_space(spacing::GAP_42);
+        ui.label(
+            RichText::new("YOUR SPACE")
+                .size(typography::OVERLINE)
+                .strong()
+                .color(MUTED),
+        );
+        ui.add_space(spacing::GAP_10);
         if navigation_button(ui, "01", "Library", self.page == Page::Library) {
             self.page = Page::Library;
         }
-        ui.add_space(6.0);
+        ui.add_space(spacing::GAP_6);
         if navigation_button(ui, "02", "Now Playing", self.page == Page::NowPlaying) {
             self.page = Page::NowPlaying;
         }
@@ -312,11 +310,15 @@ impl AurelisDesktop {
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
             ui.label(
                 RichText::new(format!("{} TRACKS", self.application.tracks().len()))
-                    .size(10.0)
+                    .size(typography::OVERLINE)
                     .strong()
                     .color(MUTED),
             );
-            ui.label(RichText::new("AURELIS CORE").size(11.0).color(ACCENT));
+            ui.label(
+                RichText::new("AURELIS CORE")
+                    .size(typography::CAPTION)
+                    .color(ACCENT),
+            );
         });
     }
     fn draw_transport(&mut self, ui: &mut egui::Ui) {
@@ -328,43 +330,56 @@ impl AurelisDesktop {
         let mut action = None;
 
         ui.horizontal(|ui| {
-            ui.add_space(5.0);
+            ui.add_space(spacing::GAP_5);
             if let Some(texture) = &self.artwork_texture {
                 ui.add(
-                    egui::Image::new((texture.id(), Vec2::splat(54.0)))
-                        .fit_to_exact_size(Vec2::splat(54.0)),
+                    egui::Image::new((texture.id(), Vec2::splat(layout::TRANSPORT_ARTWORK_SIZE)))
+                        .fit_to_exact_size(Vec2::splat(layout::TRANSPORT_ARTWORK_SIZE)),
                 );
             } else {
-                artwork_fallback(ui, Vec2::splat(54.0));
+                artwork_fallback(ui, Vec2::splat(layout::TRANSPORT_ARTWORK_SIZE));
             }
 
-            ui.add_space(14.0);
+            ui.add_space(spacing::GAP_14);
             ui.vertical(|ui| {
                 if let Some(track) = &current_track {
-                    ui.label(RichText::new(&track.title).size(14.0).strong().color(TEXT));
-                    ui.label(RichText::new(&track.artist).size(12.0).color(MUTED));
+                    ui.label(
+                        RichText::new(&track.title)
+                            .size(typography::BODY_LARGE)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new(&track.artist)
+                            .size(typography::BODY_SMALL)
+                            .color(MUTED),
+                    );
                 } else {
                     ui.label(
                         RichText::new("Nothing playing")
-                            .size(14.0)
+                            .size(typography::BODY_LARGE)
                             .strong()
                             .color(TEXT),
                     );
                     ui.label(
                         RichText::new("Choose a track from your library")
-                            .size(12.0)
+                            .size(typography::BODY_SMALL)
                             .color(MUTED),
                     );
                 }
             });
 
-            ui.add_space(28.0);
+            ui.add_space(spacing::GAP_28);
             if ui
                 .add_enabled(
                     playback.current_track_id.is_some(),
-                    egui::Button::new(RichText::new("‹").size(26.0).color(TEXT))
-                        .fill(SIDEBAR)
-                        .stroke(Stroke::NONE),
+                    egui::Button::new(
+                        RichText::new("‹")
+                            .size(typography::NAVIGATION_ICON)
+                            .color(TEXT),
+                    )
+                    .fill(SIDEBAR)
+                    .stroke(Stroke::NONE),
                 )
                 .clicked()
             {
@@ -377,10 +392,14 @@ impl AurelisDesktop {
             if ui
                 .add_enabled(
                     playback.current_track_id.is_some(),
-                    egui::Button::new(RichText::new(play_label).size(20.0).color(TEXT))
-                        .fill(ACCENT_DARK)
-                        .stroke(Stroke::NONE)
-                        .min_size(Vec2::splat(42.0)),
+                    egui::Button::new(
+                        RichText::new(play_label)
+                            .size(typography::CONTROL_ICON)
+                            .color(TEXT),
+                    )
+                    .fill(ACCENT_DARK)
+                    .stroke(Stroke::NONE)
+                    .min_size(Vec2::splat(layout::PRIMARY_BUTTON_SIZE)),
                 )
                 .clicked()
             {
@@ -389,9 +408,13 @@ impl AurelisDesktop {
             if ui
                 .add_enabled(
                     playback.current_track_id.is_some(),
-                    egui::Button::new(RichText::new("■").size(15.0).color(TEXT))
-                        .fill(SIDEBAR)
-                        .stroke(Stroke::NONE),
+                    egui::Button::new(
+                        RichText::new("■")
+                            .size(typography::CONTROL_ICON_SMALL)
+                            .color(TEXT),
+                    )
+                    .fill(SIDEBAR)
+                    .stroke(Stroke::NONE),
                 )
                 .clicked()
             {
@@ -400,9 +423,13 @@ impl AurelisDesktop {
             if ui
                 .add_enabled(
                     playback.current_track_id.is_some(),
-                    egui::Button::new(RichText::new("›").size(26.0).color(TEXT))
-                        .fill(SIDEBAR)
-                        .stroke(Stroke::NONE),
+                    egui::Button::new(
+                        RichText::new("›")
+                            .size(typography::NAVIGATION_ICON)
+                            .color(TEXT),
+                    )
+                    .fill(SIDEBAR)
+                    .stroke(Stroke::NONE),
                 )
                 .clicked()
             {
@@ -422,12 +449,12 @@ impl AurelisDesktop {
                         format_time(playback.position),
                         playback.duration.map_or("--:--".to_owned(), format_time)
                     ))
-                    .size(11.0)
+                    .size(typography::CAPTION)
                     .color(MUTED),
                 );
                 ui.add(
                     egui::ProgressBar::new(progress)
-                        .desired_width(180.0)
+                        .desired_width(layout::PROGRESS_WIDTH)
                         .fill(ACCENT),
                 );
             });
@@ -464,33 +491,42 @@ impl AurelisDesktop {
     }
 
     fn draw_library(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(34.0);
+        ui.add_space(spacing::GAP_34);
         ui.label(
             RichText::new("YOUR COLLECTION")
-                .size(11.0)
+                .size(typography::CAPTION)
                 .strong()
                 .color(ACCENT),
         );
-        ui.add_space(8.0);
-        ui.heading(RichText::new("Library").size(34.0).strong().color(TEXT));
-        ui.add_space(8.0);
+        ui.add_space(spacing::GAP_8);
+        ui.heading(
+            RichText::new("Library")
+                .size(typography::PAGE_TITLE)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(spacing::GAP_8);
 
         let root_label = self.application.library_root().map_or(
             "A local library, indexed on this device.".to_owned(),
             |root| root.display().to_string(),
         );
-        ui.label(RichText::new(root_label).size(13.0).color(MUTED));
-        ui.add_space(22.0);
+        ui.label(
+            RichText::new(root_label)
+                .size(typography::BODY)
+                .color(MUTED),
+        );
+        ui.add_space(spacing::GAP_22);
 
         Frame::new()
             .fill(SURFACE)
-            .stroke(Stroke::new(1.0, EDGE))
-            .inner_margin(egui::Margin::same(16))
+            .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+            .inner_margin(egui::Margin::same(layout::CARD_INSET))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.library_path)
-                            .desired_width(ui.available_width() - 252.0)
+                            .desired_width(ui.available_width() - layout::LIBRARY_ACTIONS_WIDTH)
                             .hint_text("Enter a folder containing your music"),
                     );
                     if ui
@@ -515,7 +551,7 @@ impl AurelisDesktop {
             });
 
         if self.application.is_scanning() {
-            ui.add_space(18.0);
+            ui.add_space(spacing::GAP_18);
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(RichText::new("Scanning files and reading metadata…").color(MUTED));
@@ -523,23 +559,32 @@ impl AurelisDesktop {
         }
 
         if let Some(message) = &self.message {
-            ui.add_space(12.0);
+            ui.add_space(spacing::GAP_12);
             draw_message(ui, message);
         }
 
-        ui.add_space(18.0);
+        ui.add_space(spacing::GAP_18);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{} tracks", self.application.tracks().len()))
-                    .size(13.0)
+                    .size(typography::BODY)
                     .strong()
                     .color(TEXT),
             );
-            ui.add_space(8.0);
-            ui.label(RichText::new("TITLE").size(10.0).strong().color(MUTED));
-            ui.label(RichText::new("·  ARTIST  ·  ALBUM").size(10.0).color(MUTED));
+            ui.add_space(spacing::GAP_8);
+            ui.label(
+                RichText::new("TITLE")
+                    .size(typography::OVERLINE)
+                    .strong()
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new("·  ARTIST  ·  ALBUM")
+                    .size(typography::OVERLINE)
+                    .color(MUTED),
+            );
         });
-        ui.add_space(8.0);
+        ui.add_space(spacing::GAP_8);
 
         if self.application.tracks().is_empty() {
             empty_state(
@@ -574,22 +619,27 @@ impl AurelisDesktop {
         }
     }
     fn draw_now_playing(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(34.0);
+        ui.add_space(spacing::GAP_34);
         ui.label(
             RichText::new("AURELIS CORE")
-                .size(11.0)
+                .size(typography::CAPTION)
                 .strong()
                 .color(ACCENT),
         );
-        ui.add_space(8.0);
-        ui.heading(RichText::new("Now Playing").size(34.0).strong().color(TEXT));
-        ui.add_space(22.0);
+        ui.add_space(spacing::GAP_8);
+        ui.heading(
+            RichText::new("Now Playing")
+                .size(typography::PAGE_TITLE)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(spacing::GAP_22);
 
         if let Some(message) = &self.message
             && matches!(message.tone, MessageTone::Error)
         {
             draw_message(ui, message);
-            ui.add_space(12.0);
+            ui.add_space(spacing::GAP_12);
         }
 
         let playback = self.application.playback();
@@ -614,31 +664,51 @@ impl AurelisDesktop {
             ui.vertical(|ui| {
                 if let Some(texture) = &self.artwork_texture {
                     ui.add(
-                        egui::Image::new((texture.id(), Vec2::splat(320.0)))
-                            .fit_to_exact_size(Vec2::splat(320.0)),
+                        egui::Image::new((
+                            texture.id(),
+                            Vec2::splat(layout::NOW_PLAYING_ARTWORK_SIZE),
+                        ))
+                        .fit_to_exact_size(Vec2::splat(layout::NOW_PLAYING_ARTWORK_SIZE)),
                     );
                 } else {
-                    artwork_fallback(ui, Vec2::splat(320.0));
+                    artwork_fallback(ui, Vec2::splat(layout::NOW_PLAYING_ARTWORK_SIZE));
                 }
-                ui.add_space(10.0);
-                ui.label(RichText::new(&self.artwork_caption).size(11.0).color(MUTED));
+                ui.add_space(spacing::GAP_10);
+                ui.label(
+                    RichText::new(&self.artwork_caption)
+                        .size(typography::CAPTION)
+                        .color(MUTED),
+                );
             });
 
-            ui.add_space(32.0);
+            ui.add_space(spacing::GAP_32);
             ui.vertical(|ui| {
-                ui.add_space(16.0);
-                ui.label(RichText::new(&track.title).size(28.0).strong().color(TEXT));
-                ui.add_space(5.0);
-                ui.label(RichText::new(&track.artist).size(17.0).color(ACCENT));
-                ui.add_space(4.0);
-                ui.label(RichText::new(&track.album).size(14.0).color(MUTED));
-                ui.add_space(25.0);
+                ui.add_space(spacing::GAP_16);
+                ui.label(
+                    RichText::new(&track.title)
+                        .size(typography::TRACK_TITLE)
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.add_space(spacing::GAP_5);
+                ui.label(
+                    RichText::new(&track.artist)
+                        .size(typography::ARTIST_TITLE)
+                        .color(ACCENT),
+                );
+                ui.add_space(spacing::GAP_4);
+                ui.label(
+                    RichText::new(&track.album)
+                        .size(typography::BODY_LARGE)
+                        .color(MUTED),
+                );
+                ui.add_space(spacing::GAP_25);
 
-                ui.label(RichText::new("PLAYBACK").size(10.0).strong().color(MUTED));
-                ui.add_space(6.0);
+                section_heading(ui, "PLAYBACK");
+                ui.add_space(spacing::GAP_6);
                 ui.label(
                     RichText::new(playback_state_label(playback.state))
-                        .size(14.0)
+                        .size(typography::BODY_LARGE)
                         .color(TEXT),
                 );
                 draw_seek_control(
@@ -648,10 +718,10 @@ impl AurelisDesktop {
                     &mut self.seek_preview_seconds,
                     &mut self.message,
                 );
-                ui.add_space(22.0);
+                ui.add_space(spacing::GAP_22);
 
-                ui.label(RichText::new("AUDIO FILE").size(10.0).strong().color(MUTED));
-                ui.add_space(8.0);
+                section_heading(ui, "AUDIO FILE");
+                ui.add_space(spacing::GAP_8);
                 metadata_row(
                     ui,
                     "Format",
@@ -698,9 +768,9 @@ impl AurelisDesktop {
         });
 
         if !playback.queue_track_ids.is_empty() {
-            ui.add_space(26.0);
-            ui.label(RichText::new("QUEUE").size(10.0).strong().color(MUTED));
-            ui.add_space(7.0);
+            ui.add_space(spacing::GAP_26);
+            section_heading(ui, "QUEUE");
+            ui.add_space(spacing::GAP_7);
             let start = playback.current_queue_index.unwrap_or(0);
             for (index, queued_id) in playback.queue_track_ids.iter().enumerate().skip(start) {
                 if let Some(queued_track) = self.application.track(*queued_id) {
@@ -708,20 +778,29 @@ impl AurelisDesktop {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{:02}", index + 1))
-                                .size(11.0)
+                                .size(typography::CAPTION)
                                 .color(MUTED),
                         );
                         ui.label(
                             RichText::new(&queued_track.title)
-                                .size(13.0)
+                                .size(typography::BODY)
                                 .color(if current { ACCENT } else { TEXT }),
                         );
-                        ui.label(RichText::new(&queued_track.artist).size(12.0).color(MUTED));
+                        ui.label(
+                            RichText::new(&queued_track.artist)
+                                .size(typography::BODY_SMALL)
+                                .color(MUTED),
+                        );
                         if current {
-                            ui.label(RichText::new("NOW").size(9.0).strong().color(ACCENT));
+                            ui.label(
+                                RichText::new("NOW")
+                                    .size(typography::MICRO)
+                                    .strong()
+                                    .color(ACCENT),
+                            );
                         }
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(spacing::GAP_4);
                 }
             }
         }
@@ -735,23 +814,26 @@ impl eframe::App for AurelisDesktop {
         self.handle_keyboard(&context);
 
         egui::Panel::left("navigation")
-            .exact_size(224.0)
+            .exact_size(layout::NAVIGATION_PANEL_WIDTH)
             .resizable(false)
             .frame(
                 Frame::new()
                     .fill(SIDEBAR)
-                    .inner_margin(egui::Margin::same(22)),
+                    .inner_margin(egui::Margin::same(layout::NAVIGATION_INSET)),
             )
             .show(ui, |ui| self.draw_navigation(ui));
 
         egui::Panel::bottom("transport")
-            .exact_size(92.0)
+            .exact_size(layout::TRANSPORT_PANEL_HEIGHT)
             .resizable(false)
             .frame(
                 Frame::new()
                     .fill(SIDEBAR)
-                    .stroke(Stroke::new(1.0, EDGE))
-                    .inner_margin(egui::Margin::symmetric(24, 14)),
+                    .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+                    .inner_margin(egui::Margin::symmetric(
+                        layout::TRANSPORT_INSET_X,
+                        layout::TRANSPORT_INSET_Y,
+                    )),
             )
             .show(ui, |ui| self.draw_transport(ui));
 
@@ -759,14 +841,17 @@ impl eframe::App for AurelisDesktop {
             .frame(
                 Frame::new()
                     .fill(CANVAS)
-                    .inner_margin(egui::Margin::symmetric(32, 0)),
+                    .inner_margin(egui::Margin::symmetric(
+                        layout::CONTENT_INSET_X,
+                        layout::CONTENT_INSET_Y,
+                    )),
             )
             .show(ui, |ui| match self.page {
                 Page::Library => self.draw_library(ui),
                 Page::NowPlaying => self.draw_now_playing(ui),
             });
 
-        context.request_repaint_after(Duration::from_millis(40));
+        context.request_repaint_after(Duration::from_millis(motion::FRAME_REFRESH_MS));
     }
 }
 #[derive(Clone, Copy)]
@@ -779,6 +864,15 @@ enum TransportAction {
 fn configure_style(context: &egui::Context) {
     context.set_theme(egui::Theme::Dark);
     context.global_style_mut(|style| {
+        style.animation_time = motion::ANIMATION_SECONDS;
+        style.visuals.window_corner_radius = radius::WINDOW;
+        style.visuals.menu_corner_radius = radius::MENU;
+        style.visuals.widgets.noninteractive.corner_radius = radius::WIDGET;
+        style.visuals.widgets.inactive.corner_radius = radius::WIDGET;
+        style.visuals.widgets.hovered.corner_radius = radius::WIDGET_HOVERED;
+        style.visuals.widgets.active.corner_radius = radius::WIDGET;
+        style.visuals.widgets.open.corner_radius = radius::WIDGET;
+
         style.visuals.override_text_color = Some(TEXT);
         style.visuals.window_fill = SURFACE;
         style.visuals.panel_fill = CANVAS;
@@ -787,131 +881,11 @@ fn configure_style(context: &egui::Context) {
         style.visuals.widgets.hovered.bg_fill = SURFACE_HOVER;
         style.visuals.widgets.active.bg_fill = ACCENT_DARK;
         style.visuals.selection.bg_fill = ACCENT_DARK;
-        style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-        style.spacing.item_spacing = Vec2::new(12.0, 10.0);
+        style.visuals.selection.stroke = Stroke::new(layout::BORDER_WIDTH, ACCENT);
+        style.spacing.item_spacing = Vec2::new(spacing::ITEM_HORIZONTAL, spacing::ITEM_VERTICAL);
     });
 }
-fn navigation_button(ui: &mut egui::Ui, number: &str, label: &str, selected: bool) -> bool {
-    let color = if selected { ACCENT } else { MUTED };
-    let fill = if selected { ACCENT_DARK } else { SIDEBAR };
-    ui.add_sized(
-        [ui.available_width(), 42.0],
-        egui::Button::new(
-            RichText::new(format!("{number}    {label}"))
-                .size(13.0)
-                .color(if selected { TEXT } else { color }),
-        )
-        .fill(fill)
-        .stroke(Stroke::NONE),
-    )
-    .clicked()
-}
 
-fn track_row(
-    ui: &mut egui::Ui,
-    index: usize,
-    track: &TrackSummary,
-    current_track: Option<TrackId>,
-) -> bool {
-    let selected = current_track == Some(track.id);
-    let fill = if selected { ACCENT_DARK } else { SURFACE };
-    let available_width = ui.available_width();
-    let mut play = false;
-
-    ui.push_id(track.id, |ui| {
-        Frame::new()
-            .fill(fill)
-            .stroke(Stroke::new(1.0, if selected { ACCENT_DARK } else { EDGE }))
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{:02}", index + 1))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-
-                    if ui
-                        .add_sized(
-                            [270.0, 38.0],
-                            egui::Button::new(
-                                RichText::new(&track.title).size(13.0).strong().color(TEXT),
-                            )
-                            .fill(fill)
-                            .stroke(Stroke::NONE),
-                        )
-                        .clicked()
-                    {
-                        play = true;
-                    }
-
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&track.artist).size(12.0).color(MUTED));
-                        if available_width > 900.0 {
-                            ui.label(RichText::new(&track.album).size(10.0).color(MUTED));
-                        }
-                    });
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(track.duration.map_or("--:--".to_owned(), format_time))
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                        if ui
-                            .add_enabled(
-                                !selected,
-                                egui::Button::new(
-                                    RichText::new("PLAY").size(9.0).strong().color(ACCENT),
-                                )
-                                .fill(fill)
-                                .stroke(Stroke::new(1.0, EDGE)),
-                            )
-                            .clicked()
-                        {
-                            play = true;
-                        }
-                    });
-                });
-            });
-        ui.add_space(5.0);
-    });
-    play
-}
-
-fn empty_state(ui: &mut egui::Ui, title: &str, description: &str) {
-    ui.add_space(58.0);
-    Frame::new()
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, EDGE))
-        .inner_margin(egui::Margin::same(28))
-        .show(ui, |ui| {
-            ui.set_min_height(170.0);
-            ui.vertical_centered(|ui| {
-                ui.add_space(28.0);
-                ui.label(RichText::new("◌").size(26.0).color(ACCENT));
-                ui.add_space(8.0);
-                ui.label(RichText::new(title).size(18.0).strong().color(TEXT));
-                ui.add_space(7.0);
-                ui.label(RichText::new(description).size(12.0).color(MUTED));
-                ui.add_space(28.0);
-            });
-        });
-}
-
-fn artwork_fallback(ui: &mut egui::Ui, size: Vec2) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 8.0, SURFACE);
-    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, EDGE), egui::StrokeKind::Inside);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "A",
-        FontId::proportional(size.x.min(size.y) * 0.22),
-        ACCENT_DARK,
-    );
-}
 fn draw_seek_control(
     ui: &mut egui::Ui,
     application: &mut DesktopApplication,
@@ -922,13 +896,13 @@ fn draw_seek_control(
     let Some(duration) = playback.duration.filter(|duration| !duration.is_zero()) else {
         ui.label(
             RichText::new("Position unavailable")
-                .size(11.0)
+                .size(typography::CAPTION)
                 .color(MUTED),
         );
         return;
     };
 
-    ui.add_space(5.0);
+    ui.add_space(spacing::GAP_5);
     let duration_seconds = duration.as_secs_f64().max(1.0);
     let mut value = seek_preview_seconds
         .unwrap_or(playback.position.as_secs_f64())
@@ -953,39 +927,17 @@ fn draw_seek_control(
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format_time(Duration::from_secs_f64(value.max(0.0))))
-                .size(10.0)
+                .size(typography::OVERLINE)
                 .color(MUTED),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(format_time(duration)).size(10.0).color(MUTED));
+            ui.label(
+                RichText::new(format_time(duration))
+                    .size(typography::OVERLINE)
+                    .color(MUTED),
+            );
         });
     });
-}
-
-fn metadata_row(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(11.0).color(MUTED));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(value).size(11.0).color(TEXT));
-        });
-    });
-}
-
-fn draw_message(ui: &mut egui::Ui, message: &BannerMessage) {
-    let (color, dot) = match message.tone {
-        MessageTone::Info => (MUTED, "•"),
-        MessageTone::Success => (SUCCESS, "•"),
-        MessageTone::Error => (ERROR, "•"),
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(dot).color(color));
-        ui.label(RichText::new(&message.text).size(12.0).color(color));
-    });
-}
-
-fn format_time(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
 fn playback_state_label(state: DesktopPlaybackState) -> &'static str {
