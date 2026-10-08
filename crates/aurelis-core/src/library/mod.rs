@@ -1,12 +1,14 @@
 mod artwork;
 mod grouping;
 mod persistence;
+mod playlist;
 mod query;
 mod scanner;
 mod track;
 
 pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
 pub use grouping::{Album, Artist};
+pub use playlist::{Playlist, PlaylistCollection, PlaylistError, PlaylistId, PlaylistTrack};
 pub use query::{SortKey, SortOrder, TrackQuery};
 pub use scanner::{DiscoveryIssue, DiscoveryResult, is_supported_audio_file, scan_directory};
 pub use track::{Track, TrackId};
