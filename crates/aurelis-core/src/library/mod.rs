@@ -1,7 +1,9 @@
+mod artwork;
 mod query;
 mod scanner;
 mod track;
 
+pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
 pub use query::{SortKey, SortOrder, TrackQuery};
 pub use scanner::{DiscoveryIssue, DiscoveryResult, is_supported_audio_file, scan_directory};
 pub use track::{Track, TrackId};
