@@ -51,7 +51,7 @@ The core library also provides APIs for ordered playlists, local LRC/plain-text 
 
 ## Known limitation
 
-Live playback depends on a working system audio output device. On the current Windows setup, audio initialization has returned error `-2004287478`; this environment-specific device issue remains unresolved. The automated tests exercise decoding and application logic without claiming successful hardware playback.
+Live playback depends on an available system audio output device and working drivers. Hardware output should be verified on the target machine; automated tests cover decoding and application logic without claiming successful hardware playback.
 
 ## License
 

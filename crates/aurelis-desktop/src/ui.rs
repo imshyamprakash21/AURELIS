@@ -585,6 +585,13 @@ impl AurelisDesktop {
         ui.heading(RichText::new("Now Playing").size(34.0).strong().color(TEXT));
         ui.add_space(22.0);
 
+        if let Some(message) = &self.message
+            && matches!(message.tone, MessageTone::Error)
+        {
+            draw_message(ui, message);
+            ui.add_space(12.0);
+        }
+
         let playback = self.application.playback();
         let Some(track_id) = playback.current_track_id else {
             empty_state(
