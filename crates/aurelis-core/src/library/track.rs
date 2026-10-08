@@ -56,26 +56,23 @@ impl Track {
         )
     }
 
-    /// Return the artist tag, album-artist tag, or artist folder when the
-    /// path follows the common `Artist/Album/track` layout.
+    /// Return the track artist tag, then the album artist tag, or the artist
+    /// folder when the path follows the common `Artist/Album/track` layout.
     pub fn display_artist(&self) -> Cow<'_, str> {
-        let artist_folder = self
-            .path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .and_then(OsStr::to_str);
-
-        display_value(
-            self.metadata
-                .artist
-                .as_deref()
-                .or(self.metadata.album_artist.as_deref()),
-            artist_folder,
-            "Unknown artist",
-        )
+        let artist_folder = artist_folder(&self.path);
+        let artist = non_empty(self.metadata.artist.as_deref())
+            .or_else(|| non_empty(self.metadata.album_artist.as_deref()));
+        display_value(artist, artist_folder, "Unknown artist")
     }
 
+    /// Return the album artist tag, falling back to the track artist and then
+    /// the artist folder when the path follows `Artist/Album/track`.
+    pub fn display_album_artist(&self) -> Cow<'_, str> {
+        let artist_folder = artist_folder(&self.path);
+        let artist = non_empty(self.metadata.album_artist.as_deref())
+            .or_else(|| non_empty(self.metadata.artist.as_deref()));
+        display_value(artist, artist_folder, "Unknown artist")
+    }
     /// Return the album tag, or the containing folder as a display fallback.
     pub fn display_album(&self) -> Cow<'_, str> {
         display_value(
@@ -93,6 +90,16 @@ impl Track {
     }
 }
 
+fn artist_folder(path: &Path) -> Option<&str> {
+    path.parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
 fn display_value<'a>(
     metadata_value: Option<&'a str>,
     path_value: Option<&'a str>,
@@ -164,5 +171,35 @@ mod tests {
         let track = track("Music/Artist/Album/song.flac", AudioMetadata::default());
 
         assert_eq!(track.display_album(), "Album");
+    }
+
+    #[test]
+    fn display_artist_skips_empty_tag_and_uses_album_artist() {
+        let track = track(
+            "Music/Artist/Album/song.flac",
+            AudioMetadata {
+                artist: Some("  ".to_owned()),
+                album_artist: Some("Album Artist".to_owned()),
+                ..AudioMetadata::default()
+            },
+        );
+
+        assert_eq!(track.display_artist(), "Album Artist");
+        assert_eq!(track.display_album_artist(), "Album Artist");
+    }
+
+    #[test]
+    fn display_album_artist_prefers_album_artist_to_track_artist() {
+        let track = track(
+            "Music/Artist/Album/song.flac",
+            AudioMetadata {
+                artist: Some("Track Artist".to_owned()),
+                album_artist: Some("Album Artist".to_owned()),
+                ..AudioMetadata::default()
+            },
+        );
+
+        assert_eq!(track.display_artist(), "Track Artist");
+        assert_eq!(track.display_album_artist(), "Album Artist");
     }
 }

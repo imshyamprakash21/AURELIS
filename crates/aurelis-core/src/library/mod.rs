@@ -1,9 +1,11 @@
 mod artwork;
+mod grouping;
 mod query;
 mod scanner;
 mod track;
 
 pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
+pub use grouping::{Album, Artist};
 pub use query::{SortKey, SortOrder, TrackQuery};
 pub use scanner::{DiscoveryIssue, DiscoveryResult, is_supported_audio_file, scan_directory};
 pub use track::{Track, TrackId};
@@ -96,6 +98,31 @@ impl MusicLibrary {
         query::execute(&self.tracks, query)
     }
 
+    /// Group tracks into albums ordered by album title and effective album artist.
+    ///
+    /// Tracks in an album are ordered by disc number, track number, and path.
+    /// Album-artist metadata is preferred, so compilation tracks with distinct
+    /// track artists remain in the same album group.
+    pub fn albums(&self) -> Vec<Album> {
+        grouping::albums(&self.tracks)
+    }
+
+    /// Group tracks by their effective track artist, ordered by artist name.
+    pub fn artists(&self) -> Vec<Artist> {
+        grouping::artists(&self.tracks)
+    }
+
+    /// Return tracks matching an album title and effective album artist.
+    /// Matching is case-insensitive and uses the same fallbacks as [`Self::albums`].
+    pub fn tracks_by_album(&self, title: &str, album_artist: &str) -> Vec<&Track> {
+        grouping::tracks_by_album(&self.tracks, title, album_artist)
+    }
+
+    /// Return tracks matching an effective track artist, ordered by album and
+    /// then disc number, track number, and path. Matching is case-insensitive.
+    pub fn tracks_by_artist(&self, artist: &str) -> Vec<&Track> {
+        grouping::tracks_by_artist(&self.tracks, artist)
+    }
     /// Discover and read metadata for supported audio files under `root`.
     ///
     /// Discovery and metadata errors are included in the returned report.
