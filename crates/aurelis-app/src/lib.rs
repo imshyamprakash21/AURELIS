@@ -13,7 +13,9 @@ pub use application::desktop::{
     DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
     PlaybackView, TrackSummary,
 };
-pub use aurelis_core::library::{ArtworkVisual, Lyrics, SyncedLyricLine, TrackId};
+pub use aurelis_core::library::{
+    ArtworkVisual, Lyrics, SyncedLyricLine, SyncedLyricSegment, TrackId,
+};
 
 /// Run the existing command-line interface.
 pub fn run_cli() {

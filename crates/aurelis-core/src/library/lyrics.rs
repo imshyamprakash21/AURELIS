@@ -17,8 +17,9 @@ pub enum Lyrics {
 }
 
 impl Lyrics {
-    /// Parse LRC text. If it contains no valid timestamps, retain it as plain
-    /// text so malformed or non-LRC sidecars remain readable.
+    /// Parse LRC or enhanced LRC text. If it contains no valid line
+    /// timestamps, retain it as plain text so malformed sidecars remain
+    /// readable.
     pub fn parse_lrc(contents: &str) -> Self {
         let mut lines = Vec::new();
 
@@ -42,10 +43,13 @@ impl Lyrics {
             }
 
             if !malformed && !timestamps.is_empty() {
+                let (text, segments) = parse_timed_segments(remainder)
+                    .unwrap_or_else(|| (remainder.to_owned(), Vec::new()));
                 for timestamp in timestamps {
                     lines.push(SyncedLyricLine {
                         timestamp,
-                        text: remainder.to_owned(),
+                        text: text.clone(),
+                        segments: segments.clone(),
                     });
                 }
             }
@@ -91,6 +95,7 @@ impl Lyrics {
 pub struct SyncedLyricLine {
     timestamp: Duration,
     text: String,
+    segments: Vec<SyncedLyricSegment>,
 }
 
 impl SyncedLyricLine {
@@ -103,19 +108,46 @@ impl SyncedLyricLine {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// Timed text segments for enhanced LRC, or an empty slice for line-timed
+    /// LRC. A segment usually represents one word, but may contain a syllable
+    /// or any other text fragment timed by the source file.
+    pub fn segments(&self) -> &[SyncedLyricSegment] {
+        &self.segments
+    }
 }
 
-/// Load lyrics from a same-stem `.lrc` file, or a same-stem `.txt` fallback.
+/// A text fragment with its own start time in enhanced LRC.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncedLyricSegment {
+    timestamp: Duration,
+    text: String,
+}
+
+impl SyncedLyricSegment {
+    /// The timestamp at which this text fragment begins.
+    pub const fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+
+    /// The text fragment, including any source whitespace around it.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// Load lyrics from a same-stem `.elrc` or `.lrc` file, or a `.txt` fallback.
 ///
-/// Missing sidecars return `Ok(None)`. The LRC file has precedence when both
-/// sidecars exist. A non-LRC or malformed LRC file is preserved as plain text.
+/// Missing sidecars return `Ok(None)`. Enhanced LRC has precedence over LRC,
+/// which has precedence over plain text. A malformed timed sidecar is
+/// preserved as plain text when it has no valid line timestamps.
 pub fn load_lyrics_for_track(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
     let audio_path = track.path();
-    for extension in ["lrc", "txt"] {
+    for extension in ["elrc", "lrc", "txt"] {
         let path = audio_path.with_extension(extension);
         match fs::read_to_string(&path) {
             Ok(contents) => {
-                let lyrics = if extension == "lrc" {
+                let lyrics = if extension != "txt" {
                     Lyrics::parse_lrc(&contents)
                 } else {
                     Lyrics::Plain { text: contents }
@@ -164,6 +196,55 @@ fn parse_timestamp(tag: &str) -> Option<Duration> {
 
     let total_seconds = minutes.checked_mul(60)?.checked_add(seconds)?;
     Some(Duration::new(total_seconds, nanoseconds))
+}
+
+/// Parse inline `<timestamp>` tags while preserving every untimed character.
+/// Text between tags remains attached to its preceding timestamp segment.
+fn parse_timed_segments(text: &str) -> Option<(String, Vec<SyncedLyricSegment>)> {
+    let mut segments = Vec::new();
+    let mut plain_text = String::new();
+    let mut current_segment: Option<SyncedLyricSegment> = None;
+    let mut pending_text = String::new();
+    let mut cursor = 0;
+
+    while let Some(open_offset) = text[cursor..].find('<') {
+        let open = cursor + open_offset;
+        pending_text.push_str(&text[cursor..open]);
+
+        let tag_start = open + 1;
+        let Some(close_offset) = text[tag_start..].find('>') else {
+            pending_text.push_str(&text[open..]);
+            cursor = text.len();
+            break;
+        };
+        let close = tag_start + close_offset;
+
+        if let Some(timestamp) = parse_timestamp(&text[tag_start..close]) {
+            if let Some(mut segment) = current_segment.take() {
+                segment.text.push_str(&pending_text);
+                pending_text.clear();
+                plain_text.push_str(&segment.text);
+                segments.push(segment);
+            }
+
+            current_segment = Some(SyncedLyricSegment {
+                timestamp,
+                text: std::mem::take(&mut pending_text),
+            });
+        } else {
+            pending_text.push_str(&text[open..=close]);
+        }
+
+        cursor = close + 1;
+    }
+
+    pending_text.push_str(&text[cursor..]);
+    let mut current_segment = current_segment?;
+    current_segment.text.push_str(&pending_text);
+    plain_text.push_str(&current_segment.text);
+    segments.push(current_segment);
+
+    Some((plain_text, segments))
 }
 
 /// An error encountered while reading a local lyrics sidecar.
@@ -259,6 +340,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_enhanced_lrc_segments_and_preserves_spacing() {
+        let lyrics = Lyrics::parse_lrc("[00:10.00]<00:10.25>First <00:10.75>second!");
+        let line = &lyrics.synced_lines().unwrap()[0];
+
+        assert_eq!(line.text(), "First second!");
+        assert_eq!(line.segments().len(), 2);
+        assert_eq!(
+            line.segments()[0].timestamp(),
+            Duration::from_millis(10_250)
+        );
+        assert_eq!(line.segments()[0].text(), "First ");
+        assert_eq!(
+            line.segments()[1].timestamp(),
+            Duration::from_millis(10_750)
+        );
+        assert_eq!(line.segments()[1].text(), "second!");
+
+        let unicode = Lyrics::parse_lrc("[00:11.00]<00:11.25>गीत <00:11.75>音楽");
+        let unicode_line = &unicode.synced_lines().unwrap()[0];
+        assert_eq!(unicode_line.text(), "गीत 音楽");
+        assert_eq!(unicode_line.segments()[0].text(), "गीत ");
+        assert_eq!(unicode_line.segments()[1].text(), "音楽");
+    }
+
+    #[test]
+    fn malformed_inline_timestamps_remain_visible_as_plain_line_text() {
+        let lyrics = Lyrics::parse_lrc("[00:01.00]First <00:xx.00>second");
+        let line = &lyrics.synced_lines().unwrap()[0];
+
+        assert_eq!(line.text(), "First <00:xx.00>second");
+        assert!(line.segments().is_empty());
+    }
+
+    #[test]
     fn sorts_unsorted_timestamps_and_keeps_equal_time_order() {
         let lyrics = Lyrics::parse_lrc("[00:02.00]Later\n[00:01.00]First\n[00:01.00]Also first");
         let lines = lyrics.synced_lines().unwrap();
@@ -309,6 +424,28 @@ mod tests {
         fs::write(&text_path, "Plain fallback").expect("write text sidecar");
         let plain = load_lyrics_for_track(&track(&audio_path)).unwrap().unwrap();
         assert_eq!(plain.plain_text(), Some("Plain fallback"));
+    }
+
+    #[test]
+    fn enhanced_lrc_has_precedence_over_lrc_and_plain_text() {
+        let directory = TestDirectory::new();
+        let audio_path = directory.path().join("song.flac");
+        fs::write(directory.path().join("song.lrc"), "[00:01.00]Line timed")
+            .expect("write LRC sidecar");
+        fs::write(
+            directory.path().join("song.elrc"),
+            "[00:02.00]<00:02.25>Word <00:02.75>timed",
+        )
+        .expect("write enhanced LRC sidecar");
+        fs::write(directory.path().join("song.txt"), "Plain fallback").expect("write text sidecar");
+
+        let lyrics = load_lyrics_for_track(&track(&audio_path))
+            .unwrap()
+            .expect("enhanced LRC sidecar");
+        let line = &lyrics.synced_lines().unwrap()[0];
+
+        assert_eq!(line.text(), "Word timed");
+        assert_eq!(line.segments().len(), 2);
     }
 
     #[test]

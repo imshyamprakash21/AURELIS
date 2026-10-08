@@ -1531,9 +1531,38 @@ impl AurelisDesktop {
                                 } else {
                                     typography::BODY
                                 };
-                                let text = RichText::new(line.text()).size(size).color(color);
-                                let text = if is_current { text.strong() } else { text };
-                                let response = ui.add(egui::Label::new(text).wrap());
+                                let response = if line.segments().is_empty() || !is_current {
+                                    let text = RichText::new(line.text()).size(size).color(color);
+                                    let text = if is_current { text.strong() } else { text };
+                                    ui.add(egui::Label::new(text).wrap())
+                                } else {
+                                    let current_segment = current_synced_lyric_segment_index(
+                                        line.segments(),
+                                        position,
+                                    );
+                                    let mut job = egui::text::LayoutJob::default();
+                                    for (segment_index, segment) in
+                                        line.segments().iter().enumerate()
+                                    {
+                                        let segment_color =
+                                            if current_segment == Some(segment_index) {
+                                                ACCENT
+                                            } else if current_segment.is_some() {
+                                                TEXT
+                                            } else {
+                                                ACCENT
+                                            };
+                                        job.append(
+                                            segment.text(),
+                                            0.0,
+                                            egui::TextFormat::simple(
+                                                egui::FontId::proportional(size),
+                                                segment_color,
+                                            ),
+                                        );
+                                    }
+                                    ui.add(egui::Label::new(job).wrap())
+                                };
                                 if is_current && current_changed {
                                     response.scroll_to_me(Some(Align::Center));
                                 }
@@ -1834,6 +1863,18 @@ fn current_synced_lyric_index(
         .checked_sub(1)
 }
 
+fn current_synced_lyric_segment_index(
+    segments: &[aurelis_app::SyncedLyricSegment],
+    position: Duration,
+) -> Option<usize> {
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| segment.timestamp() <= position)
+        .max_by_key(|(_, segment)| segment.timestamp())
+        .map(|(index, _)| index)
+}
+
 fn sample_artwork_pixels(image: &image::RgbaImage) -> Vec<[u8; 4]> {
     const MAX_SAMPLE_EDGE: usize = 32;
 
@@ -1894,7 +1935,7 @@ mod artwork_tint_tests {
 
 #[cfg(test)]
 mod lyric_sync_tests {
-    use super::current_synced_lyric_index;
+    use super::{current_synced_lyric_index, current_synced_lyric_segment_index};
     use aurelis_app::Lyrics;
     use std::time::Duration;
 
@@ -1917,6 +1958,29 @@ mod lyric_sync_tests {
         );
         assert_eq!(
             current_synced_lyric_index(lines, Duration::from_secs(3)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn follows_enhanced_lyric_segments_using_the_playback_position() {
+        let lyrics = Lyrics::parse_lrc("[00:01.00]<00:01.25>First <00:01.75>second");
+        let segments = lyrics.synced_lines().unwrap()[0].segments();
+
+        assert_eq!(
+            current_synced_lyric_segment_index(segments, Duration::from_millis(1_249)),
+            None
+        );
+        assert_eq!(
+            current_synced_lyric_segment_index(segments, Duration::from_millis(1_250)),
+            Some(0)
+        );
+        assert_eq!(
+            current_synced_lyric_segment_index(segments, Duration::from_millis(1_749)),
+            Some(0)
+        );
+        assert_eq!(
+            current_synced_lyric_segment_index(segments, Duration::from_millis(1_750)),
             Some(1)
         );
     }
