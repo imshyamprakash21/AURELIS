@@ -4,7 +4,7 @@ use aurelis_core::audio::AudioMetadata;
 
 use crate::{
     application::player::run_direct_playback, library_browser, library_play_test, library_search,
-    library_test, print_metadata, print_usage,
+    library_test, presentation::metadata::print_metadata,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -54,6 +54,38 @@ fn parse_library_play_arguments(
         track_id,
         queued_ids,
     })
+}
+
+fn print_usage() {
+    println!();
+    println!("AURELIS");
+    println!("────────────────────────────────────────────────────────");
+    println!();
+    println!("PLAYBACK");
+    println!("  <file>                         Play an audio file");
+    println!("  library-play <directory> <track-id> [queued-track-id ...]");
+    println!("  library-play <directory> --all");
+    println!();
+    println!("LIBRARY");
+    println!("  library <directory>            Browse the library");
+    println!();
+    println!("SEARCH & QUERY");
+    println!("  library-search <directory> <query>");
+    println!("  library-search-play <directory> <query> <result-number>");
+    println!("  library-search-play-all <directory> <query>");
+    println!("  library-query <directory> <query-options>");
+    println!("  library-query-play <directory> <result-number> <query-options>");
+    println!("  library-query-play-all <directory> <query-options>");
+    println!("  Options: --search, --artist, --album, --genre, --year, --sort, --order");
+    println!("  Sort keys: title, artist, album, year, track, duration, path");
+    println!("  Sort order: asc or desc (default: title ascending)");
+    println!();
+    println!("INFORMATION");
+    println!("  --help                         Show command help");
+    println!("  --info <file>                  Show technical audio metadata");
+    println!();
+    println!("DEVELOPMENT / TEST");
+    println!("  library-test <directory>       Run the interactive library diagnostics");
 }
 
 fn print_library_play_usage() {

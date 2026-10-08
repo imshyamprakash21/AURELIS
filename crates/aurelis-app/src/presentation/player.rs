@@ -481,3 +481,39 @@ pub(crate) fn format_progress_line(position: Duration, total: Option<Duration>) 
             .unwrap_or_else(|| "--:--".to_string())
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{format_progress_line, truncate_text};
+
+    use std::time::Duration;
+
+    #[test]
+    fn truncates_long_text() {
+        let text = "This is a very long title";
+
+        let result = truncate_text(text, 10);
+
+        assert_eq!(result, "This is...");
+    }
+
+    #[test]
+    fn keeps_short_text_unchanged() {
+        let text = "sample3";
+
+        assert_eq!(truncate_text(text, 20,), text);
+    }
+
+    #[test]
+    fn progress_line_contains_time_and_bar() {
+        let line = format_progress_line(Duration::from_secs(30), Some(Duration::from_secs(90)));
+
+        assert!(line.contains("00:30"));
+
+        assert!(line.contains("01:30"));
+
+        assert!(line.contains("━"));
+
+        assert!(line.contains("·"));
+    }
+}
