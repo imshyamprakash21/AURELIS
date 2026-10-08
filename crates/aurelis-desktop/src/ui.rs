@@ -7,8 +7,9 @@ use std::{
 };
 
 use crate::components::{
-    BannerMessage, MessageTone, artwork_fallback, collection_row, draw_message, empty_state,
-    format_time, library_statistic, metadata_row, navigation_button, section_heading, track_row,
+    BannerMessage, MessageTone, TrackRowAction, artwork_fallback, collection_row, draw_message,
+    empty_state, format_time, library_statistic, metadata_row, navigation_button, section_heading,
+    track_row,
 };
 use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
@@ -125,8 +126,16 @@ struct CollectionTarget {
 }
 
 enum SearchSelection {
-    Track(TrackId),
+    TrackAction(TrackRowAction),
     Collection(CollectionTarget),
+}
+
+#[derive(Clone, Copy)]
+enum QueueAction {
+    ClearUpcoming,
+    Move { from: usize, to: usize },
+    Remove(usize),
+    Play(TrackId),
 }
 
 struct SelectedCollection {
@@ -913,8 +922,8 @@ impl AurelisDesktop {
                         .size(typography::BODY_SMALL)
                         .color(MUTED),
                 );
-                if let Some(track_id) = render_track_list(ui, &collection.tracks, current_track) {
-                    self.play_selected_track(track_id);
+                if let Some(action) = render_track_list(ui, &collection.tracks, current_track) {
+                    self.handle_track_row_action(action);
                 }
             } else if self.search_results.tracks.is_empty()
                 && self.search_results.albums.is_empty()
@@ -930,7 +939,7 @@ impl AurelisDesktop {
                 render_search_results(ui, &self.search_results, current_track)
             {
                 match selection {
-                    SearchSelection::Track(track_id) => self.play_selected_track(track_id),
+                    SearchSelection::TrackAction(action) => self.handle_track_row_action(action),
                     SearchSelection::Collection(target) => self.open_collection(target),
                 }
             }
@@ -958,7 +967,7 @@ impl AurelisDesktop {
                 return;
             }
             let current_track = self.application.playback().current_track_id;
-            let selected_track = if let Some(collection) = self.selected_collection.as_ref() {
+            let selected_action = if let Some(collection) = self.selected_collection.as_ref() {
                 section_heading(ui, &collection.title);
                 ui.label(
                     RichText::new(&collection.subtitle)
@@ -969,8 +978,8 @@ impl AurelisDesktop {
             } else {
                 None
             };
-            if let Some(track_id) = selected_track {
-                self.play_selected_track(track_id);
+            if let Some(action) = selected_action {
+                self.handle_track_row_action(action);
             }
             return;
         }
@@ -979,10 +988,10 @@ impl AurelisDesktop {
             LibrarySection::Home => self.draw_library_home(ui),
             LibrarySection::Tracks => {
                 let current_track = self.application.playback().current_track_id;
-                if let Some(track_id) =
+                if let Some(action) =
                     render_track_list(ui, self.application.tracks(), current_track)
                 {
-                    self.play_selected_track(track_id);
+                    self.handle_track_row_action(action);
                 }
             }
             LibrarySection::Albums => self.draw_album_groups(ui),
@@ -1102,6 +1111,56 @@ impl AurelisDesktop {
             Err(error) => self.show_message(error, MessageTone::Error),
         }
     }
+
+    fn handle_track_row_action(&mut self, action: TrackRowAction) {
+        match action {
+            TrackRowAction::Play(track_id) => self.play_selected_track(track_id),
+            TrackRowAction::Queue(track_id) => {
+                let title = self
+                    .application
+                    .track(track_id)
+                    .map(|track| track.title.clone())
+                    .unwrap_or_else(|| "Track".to_owned());
+                match self.application.enqueue_track(track_id) {
+                    Ok(()) => self
+                        .show_message(format!("Added {title} to the queue"), MessageTone::Success),
+                    Err(error) => self.show_message(error, MessageTone::Error),
+                }
+            }
+        }
+    }
+
+    fn handle_queue_action(&mut self, action: QueueAction) {
+        match action {
+            QueueAction::ClearUpcoming => {
+                let removed = self.application.clear_upcoming_queue();
+                if removed > 0 {
+                    self.show_message(
+                        format!("Cleared {removed} upcoming track(s)"),
+                        MessageTone::Info,
+                    );
+                }
+            }
+            QueueAction::Move { from, to } => {
+                if let Err(error) = self.application.move_upcoming_track(from, to) {
+                    self.show_message(error, MessageTone::Error);
+                }
+            }
+            QueueAction::Remove(index) => match self.application.remove_upcoming_track(index) {
+                Ok(track_id) => {
+                    let title = self
+                        .application
+                        .track(track_id)
+                        .map(|track| track.title.clone())
+                        .unwrap_or_else(|| "Track".to_owned());
+                    self.show_message(format!("Removed {title} from the queue"), MessageTone::Info);
+                }
+                Err(error) => self.show_message(error, MessageTone::Error),
+            },
+            QueueAction::Play(track_id) => self.play_selected_track(track_id),
+        }
+    }
+
     fn draw_now_playing(&mut self, ui: &mut egui::Ui) {
         let artwork_tint = self.displayed_artwork_tint();
         if let Some(tint) = artwork_tint {
@@ -1279,39 +1338,129 @@ impl AurelisDesktop {
 
         if !playback.queue_track_ids.is_empty() {
             ui.add_space(spacing::GAP_26);
-            section_heading(ui, "QUEUE");
-            ui.add_space(spacing::GAP_7);
+            let upcoming_start = playback
+                .current_queue_index
+                .map_or(0, |index| index.saturating_add(1));
+            let mut queue_action = None;
+            ui.horizontal(|ui| {
+                section_heading(ui, "QUEUE");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if playback.queue_track_ids.len() > upcoming_start
+                        && ui.button("CLEAR UPCOMING").clicked()
+                    {
+                        queue_action = Some(QueueAction::ClearUpcoming);
+                    }
+                });
+            });
+            ui.add_space(spacing::GAP_8);
             let start = playback.current_queue_index.unwrap_or(0);
-            for (index, queued_id) in playback.queue_track_ids.iter().enumerate().skip(start) {
-                if let Some(queued_track) = self.application.track(*queued_id) {
-                    let current = index == playback.current_queue_index.unwrap_or(usize::MAX);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{:02}", index + 1))
-                                .size(typography::CAPTION)
-                                .color(MUTED),
-                        );
-                        ui.label(
-                            RichText::new(&queued_track.title)
-                                .size(typography::BODY)
-                                .color(if current { ACCENT } else { TEXT }),
-                        );
-                        ui.label(
-                            RichText::new(&queued_track.artist)
-                                .size(typography::BODY_SMALL)
-                                .color(MUTED),
-                        );
-                        if current {
-                            ui.label(
-                                RichText::new("NOW")
-                                    .size(typography::MICRO)
-                                    .strong()
-                                    .color(ACCENT),
+            let visible_count = playback.queue_track_ids.len().saturating_sub(start);
+            egui::ScrollArea::vertical()
+                .id_salt("now-playing-queue")
+                .max_height(300.0)
+                .show_rows(ui, layout::QUEUE_ROW_HEIGHT, visible_count, |ui, rows| {
+                    for visible_index in rows {
+                        let index = start + visible_index;
+                        if let Some(queued_id) = playback.queue_track_ids.get(index)
+                            && let Some(queued_track) = self.application.track(*queued_id)
+                        {
+                            let current =
+                                index == playback.current_queue_index.unwrap_or(usize::MAX);
+                            let upcoming = index >= upcoming_start;
+                            let row_size =
+                                Vec2::new(ui.available_width(), layout::QUEUE_ROW_HEIGHT);
+                            ui.allocate_ui_with_layout(
+                                row_size,
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    let controls_reserve = if upcoming { 210.0 } else { 56.0 };
+                                    let metadata_width =
+                                        (ui.available_width() - controls_reserve - 40.0).max(120.0);
+                                    let title_width = metadata_width * 0.62;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("{:02}", index + 1))
+                                                .size(typography::CAPTION)
+                                                .color(MUTED),
+                                        );
+                                        ui.add_sized(
+                                            [title_width, layout::QUEUE_ROW_HEIGHT],
+                                            egui::Label::new(
+                                                RichText::new(&queued_track.title)
+                                                    .size(typography::BODY)
+                                                    .color(if current { ACCENT } else { TEXT }),
+                                            )
+                                            .truncate(),
+                                        );
+                                        ui.add_sized(
+                                            [
+                                                metadata_width - title_width,
+                                                layout::QUEUE_ROW_HEIGHT,
+                                            ],
+                                            egui::Label::new(
+                                                RichText::new(&queued_track.artist)
+                                                    .size(typography::BODY_SMALL)
+                                                    .color(MUTED),
+                                            )
+                                            .truncate(),
+                                        );
+                                        if current {
+                                            ui.label(
+                                                RichText::new("NOW")
+                                                    .size(typography::MICRO)
+                                                    .strong()
+                                                    .color(ACCENT),
+                                            );
+                                        } else if upcoming {
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ui.button("REMOVE").clicked() {
+                                                        queue_action =
+                                                            Some(QueueAction::Remove(index));
+                                                    }
+                                                    if ui.button("PLAY").clicked() {
+                                                        queue_action =
+                                                            Some(QueueAction::Play(*queued_id));
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            index + 1
+                                                                < playback.queue_track_ids.len(),
+                                                            egui::Button::new("↓"),
+                                                        )
+                                                        .on_hover_text("Move down")
+                                                        .clicked()
+                                                    {
+                                                        queue_action = Some(QueueAction::Move {
+                                                            from: index,
+                                                            to: index + 1,
+                                                        });
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            index > upcoming_start,
+                                                            egui::Button::new("↑"),
+                                                        )
+                                                        .on_hover_text("Move up")
+                                                        .clicked()
+                                                    {
+                                                        queue_action = Some(QueueAction::Move {
+                                                            from: index,
+                                                            to: index - 1,
+                                                        });
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    });
+                                },
                             );
                         }
-                    });
-                    ui.add_space(spacing::GAP_4);
-                }
+                    }
+                });
+            if let Some(action) = queue_action {
+                self.handle_queue_action(action);
             }
         }
 
@@ -1452,7 +1601,7 @@ fn render_track_list(
     ui: &mut egui::Ui,
     tracks: &[TrackSummary],
     current_track: Option<TrackId>,
-) -> Option<TrackId> {
+) -> Option<TrackRowAction> {
     if tracks.is_empty() {
         empty_state(
             ui,
@@ -1485,17 +1634,17 @@ fn render_track_list(
     });
     ui.add_space(spacing::GAP_8);
 
-    let mut selected_track = None;
+    let mut selected_action = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, track) in tracks.iter().enumerate() {
-                if track_row(ui, index, track, current_track) {
-                    selected_track = Some(track.id);
+                if let Some(action) = track_row(ui, index, track, current_track) {
+                    selected_action = Some(action);
                 }
             }
         });
-    selected_track
+    selected_action
 }
 
 fn render_group_list<T: BrowseGroup>(ui: &mut egui::Ui, groups: &[T]) -> Option<CollectionTarget> {
@@ -1541,8 +1690,8 @@ fn render_search_results(
             if !results.tracks.is_empty() {
                 section_heading(ui, "TRACKS");
                 for (index, track) in results.tracks.iter().enumerate() {
-                    if track_row(ui, index, track, current_track) {
-                        selection = Some(SearchSelection::Track(track.id));
+                    if let Some(action) = track_row(ui, index, track, current_track) {
+                        selection = Some(SearchSelection::TrackAction(action));
                     }
                 }
                 ui.add_space(spacing::GAP_12);

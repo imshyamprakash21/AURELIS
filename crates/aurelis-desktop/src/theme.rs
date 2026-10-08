@@ -66,6 +66,7 @@ pub(crate) mod layout {
     pub(crate) const LIBRARY_ACTIONS_WIDTH: f32 = 252.0;
     pub(crate) const TRACK_TITLE_WIDTH: f32 = 270.0;
     pub(crate) const TRACK_ROW_BUTTON_HEIGHT: f32 = 38.0;
+    pub(crate) const QUEUE_ROW_HEIGHT: f32 = 36.0;
     pub(crate) const EMPTY_STATE_MIN_HEIGHT: f32 = 170.0;
     pub(crate) const WIDE_LIBRARY_BREAKPOINT: f32 = 900.0;
     pub(crate) const COLLECTION_ROW_HEIGHT: f32 = 54.0;

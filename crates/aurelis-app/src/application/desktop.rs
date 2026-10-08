@@ -413,6 +413,39 @@ impl DesktopApplication {
             .map_err(|error| error.to_string())
     }
 
+    pub fn enqueue_track(&mut self, track_id: TrackId) -> Result<(), String> {
+        self.player
+            .enqueue(&self.library, track_id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn enqueue_tracks(
+        &mut self,
+        track_ids: impl IntoIterator<Item = TrackId>,
+    ) -> Result<(), String> {
+        self.player
+            .enqueue_tracks(&self.library, track_ids)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn remove_upcoming_track(&mut self, index: usize) -> Result<TrackId, String> {
+        self.player
+            .remove_upcoming_track(index)
+            .ok_or_else(|| "Only upcoming tracks can be removed from the queue.".to_owned())
+    }
+
+    pub fn move_upcoming_track(&mut self, from: usize, to: usize) -> Result<(), String> {
+        self.player
+            .move_upcoming_track(from, to)
+            .then_some(())
+            .ok_or_else(|| "Only upcoming tracks can be reordered in the queue.".to_owned())
+    }
+
+    /// Clear upcoming entries while keeping the active queue item and playback intact.
+    pub fn clear_upcoming_queue(&mut self) -> usize {
+        self.player.clear_upcoming_queue()
+    }
+
     pub fn toggle_playback(&mut self) -> Result<(), String> {
         match self.player.playback_state() {
             PlaybackStatus::Playing => {
@@ -856,6 +889,44 @@ mod tests {
             .expect("start lyrics lookup");
 
         assert!(wait_for_lyrics(&mut application, track_id).is_none());
+    }
+
+    #[test]
+    fn desktop_queue_facade_enqueues_reorders_removes_and_clears_upcoming_tracks() {
+        let mut application = DesktopApplication::new();
+        let first = application
+            .library
+            .add_track("Music/First.flac", AudioMetadata::default());
+        let second = application
+            .library
+            .add_track("Music/Second.flac", AudioMetadata::default());
+        let third = application
+            .library
+            .add_track("Music/Third.flac", AudioMetadata::default());
+
+        application
+            .enqueue_tracks([first, second, third])
+            .expect("enqueue tracks");
+        assert_eq!(
+            application.playback().queue_track_ids,
+            [first, second, third]
+        );
+
+        application
+            .move_upcoming_track(0, 2)
+            .expect("reorder queued tracks");
+        assert_eq!(
+            application.playback().queue_track_ids,
+            [second, third, first]
+        );
+        assert_eq!(
+            application
+                .remove_upcoming_track(1)
+                .expect("remove upcoming track"),
+            third
+        );
+        assert_eq!(application.clear_upcoming_queue(), 2);
+        assert!(application.playback().queue_track_ids.is_empty());
     }
 
     #[test]

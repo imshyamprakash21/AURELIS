@@ -47,16 +47,22 @@ pub(crate) fn navigation_button(
     .clicked()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TrackRowAction {
+    Play(TrackId),
+    Queue(TrackId),
+}
+
 pub(crate) fn track_row(
     ui: &mut egui::Ui,
     index: usize,
     track: &TrackSummary,
     current_track: Option<TrackId>,
-) -> bool {
+) -> Option<TrackRowAction> {
     let selected = current_track == Some(track.id);
     let fill = if selected { ACCENT_DARK } else { SURFACE };
     let available_width = ui.available_width();
-    let mut play = false;
+    let mut action = None;
 
     ui.push_id(track.id, |ui| {
         Frame::new()
@@ -91,7 +97,7 @@ pub(crate) fn track_row(
                         )
                         .clicked()
                     {
-                        play = true;
+                        action = Some(TrackRowAction::Play(track.id));
                     }
 
                     ui.vertical(|ui| {
@@ -129,14 +135,25 @@ pub(crate) fn track_row(
                             )
                             .clicked()
                         {
-                            play = true;
+                            action = Some(TrackRowAction::Play(track.id));
+                        }
+                        if ui
+                            .button(
+                                RichText::new("QUEUE")
+                                    .size(typography::MICRO)
+                                    .strong()
+                                    .color(ACCENT),
+                            )
+                            .clicked()
+                        {
+                            action = Some(TrackRowAction::Queue(track.id));
                         }
                     });
                 });
             });
         ui.add_space(spacing::GAP_5);
     });
-    play
+    action
 }
 
 pub(crate) fn collection_row(

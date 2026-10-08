@@ -43,6 +43,8 @@ Run `aurelis-app --help` for the complete command list. Library scanning current
 
 During playback, left/right arrows seek by five seconds; `p` pauses, `r` resumes, `s` stops, and `q` quits. Library playback also supports `n`/`b` for next/previous track and `c` to clear the remaining queue. The `status` command shows technical details and artwork availability/source during library playback.
 
+The desktop Now Playing view exposes queue controls to play, reorder, remove, and clear upcoming tracks. Library and search rows can add tracks to the queue; clearing upcoming tracks leaves current playback running.
+
 ## Library data
 
 The library index is stored under `.aurelis_cache/library-index.json` inside each scanned music folder. It is rebuilt when missing or invalid and is ignored by Git. AURELIS does not require network access or a database for local playback and scanning.

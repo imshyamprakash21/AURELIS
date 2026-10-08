@@ -214,6 +214,45 @@ impl PlaybackQueue {
             .or_else(|| self.entries.iter().position(|entry| *entry == track_id))
     }
 
+    fn upcoming_start(&self) -> usize {
+        self.current_index
+            .map_or(0, |index| index.saturating_add(1))
+    }
+
+    fn remove_upcoming(&mut self, index: usize) -> Option<TrackId> {
+        if index < self.upcoming_start() || index >= self.entries.len() {
+            return None;
+        }
+        Some(self.entries.remove(index))
+    }
+
+    fn move_upcoming(&mut self, from: usize, to: usize) -> bool {
+        let upcoming_start = self.upcoming_start();
+        if from < upcoming_start
+            || to < upcoming_start
+            || from >= self.entries.len()
+            || to >= self.entries.len()
+        {
+            return false;
+        }
+        if from != to {
+            let track_id = self.entries.remove(from);
+            self.entries.insert(to, track_id);
+        }
+        true
+    }
+
+    fn clear_upcoming(&mut self) -> usize {
+        let previous_len = self.entries.len();
+        if let Some(current_index) = self.current_index {
+            self.entries
+                .truncate(current_index.saturating_add(1).min(previous_len));
+        } else {
+            self.entries.clear();
+        }
+        previous_len - self.entries.len()
+    }
+
     fn select(&mut self, track_id: TrackId, existing_index: Option<usize>) {
         if let Some(index) = existing_index {
             self.current_index = Some(index);
@@ -381,6 +420,18 @@ impl PlayerController {
 
     pub(crate) fn clear_queue(&mut self) {
         self.session.queue.clear();
+    }
+
+    pub(crate) fn clear_upcoming_queue(&mut self) -> usize {
+        self.session.queue.clear_upcoming()
+    }
+
+    pub(crate) fn remove_upcoming_track(&mut self, index: usize) -> Option<TrackId> {
+        self.session.queue.remove_upcoming(index)
+    }
+
+    pub(crate) fn move_upcoming_track(&mut self, from: usize, to: usize) -> bool {
+        self.session.queue.move_upcoming(from, to)
     }
 
     /// Start the next queued track, returning `None` at the end of the queue.
@@ -880,6 +931,43 @@ mod tests {
         assert_eq!(middle.current_index(), Some(1));
         assert_eq!(middle.previous_track_id(), Some(first));
         assert_eq!(middle.next_track_id(), Some(third));
+    }
+
+    #[test]
+    fn queue_edits_only_affect_upcoming_entries_and_keep_the_active_cursor() {
+        let (_, first, second, third) = test_library();
+        let mut queue = PlaybackQueue {
+            entries: vec![first, second, third],
+            current_index: Some(0),
+        };
+
+        assert!(queue.move_upcoming(1, 2));
+        assert_eq!(queue.entries, [first, third, second]);
+        assert_eq!(queue.current_index, Some(0));
+        assert_eq!(queue.next_index(), Some(1));
+        assert!(!queue.move_upcoming(0, 1));
+        assert_eq!(queue.remove_upcoming(0), None);
+        assert_eq!(queue.remove_upcoming(2), Some(second));
+        assert_eq!(queue.entries, [first, third]);
+        assert_eq!(queue.clear_upcoming(), 1);
+        assert_eq!(queue.entries, [first]);
+        assert_eq!(queue.current_index, Some(0));
+    }
+
+    #[test]
+    fn queue_edits_work_before_playback_starts() {
+        let (_, first, second, third) = test_library();
+        let mut queue = PlaybackQueue {
+            entries: vec![first, second, third],
+            current_index: None,
+        };
+
+        assert!(queue.move_upcoming(0, 2));
+        assert_eq!(queue.entries, [second, third, first]);
+        assert_eq!(queue.remove_upcoming(1), Some(third));
+        assert_eq!(queue.clear_upcoming(), 2);
+        assert!(queue.entries.is_empty());
+        assert_eq!(queue.current_index, None);
     }
 
     #[test]
