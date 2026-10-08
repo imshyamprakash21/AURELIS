@@ -1,0 +1,12 @@
+[package]
+name = "aurelis-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aurelis-app = { path = "../aurelis-app" }
+eframe = "0.36.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rfd = "0.15"

@@ -1,8 +1,8 @@
 # AURELIS
 
-AURELIS is a local-first Rust music player and library toolkit. The current application is a terminal player; it scans local folders, displays metadata, supports library queries, and manages playback queues.
+AURELIS is a local-first Rust music player and library toolkit. AURELIS includes a native desktop player and a terminal diagnostic interface. Both use the same Rust audio engine, library scanner, artwork cache, and application playback controller.
 
-The project is version `0.1.0` and remains under active development. Audio playback is handled by the core crate, while command routing, terminal input, playback workflows, and rendering live in the application crate.
+The project is version `0.1.0` and remains under active development. The core crate handles audio playback. The application crate provides library and playback workflows, command routing, terminal input, and shared presentation helpers; the desktop crate provides the native window and its UI.
 
 ## Build and test
 
@@ -15,6 +15,9 @@ cargo run -p aurelis-app -- --help
 ```
 
 ## Run
+
+Launch the native desktop application with `cargo run -p aurelis-desktop`.
+Use `cargo run -p aurelis-app -- --help` for the command-line diagnostic interface.
 
 ```powershell
 # Play a file

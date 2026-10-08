@@ -2,6 +2,7 @@
 members = [
     "crates/aurelis-core",
     "crates/aurelis-app",
+    "crates/aurelis-desktop",
 ]
 
 resolver = "3"
