@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -10,11 +10,13 @@ use std::{
 };
 
 use aurelis_core::library::{
-    Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, MusicLibrary, Track,
-    TrackId, TrackQuery,
+    Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, Lyrics, MusicLibrary,
+    Track, TrackId, TrackQuery, load_lyrics_for_track,
 };
 
 use crate::player_controller::{PlaybackControlTarget, PlaybackStatus, PlayerController};
+
+const MAX_LYRICS_CACHE_ENTRIES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DesktopPlaybackState {
@@ -181,6 +183,9 @@ pub struct DesktopApplication {
     artwork_cache: Arc<Mutex<ArtworkCache>>,
     artwork_result_rx: Option<Receiver<Result<Option<Arc<Artwork>>, String>>>,
     artwork_loading_track: Option<TrackId>,
+    lyrics_cache: HashMap<TrackId, Option<Lyrics>>,
+    lyrics_result_rx: Option<Receiver<Result<Option<Lyrics>, String>>>,
+    lyrics_loading_track: Option<TrackId>,
     library_root: Option<PathBuf>,
     scan_result_rx: Option<Receiver<ScanResult>>,
 }
@@ -199,6 +204,9 @@ impl DesktopApplication {
             artwork_cache: Arc::new(Mutex::new(ArtworkCache::new())),
             artwork_result_rx: None,
             artwork_loading_track: None,
+            lyrics_cache: HashMap::new(),
+            lyrics_result_rx: None,
+            lyrics_loading_track: None,
             library_root: None,
             scan_result_rx: None,
         }
@@ -365,6 +373,9 @@ impl DesktopApplication {
         self.artwork_result_rx = None;
         self.artwork_loading_track = None;
         self.artwork_cache = Arc::new(Mutex::new(ArtworkCache::new()));
+        self.lyrics_result_rx = None;
+        self.lyrics_loading_track = None;
+        self.lyrics_cache.clear();
 
         Some(Ok(received.summary))
     }
@@ -507,6 +518,74 @@ impl DesktopApplication {
             result.map(|artwork| artwork.map(|artwork| ArtworkView::from(artwork.as_ref()))),
         ))
     }
+
+    pub fn lyrics_loading_track(&self) -> Option<TrackId> {
+        self.lyrics_loading_track
+    }
+
+    /// Load a track's local lyrics sidecar without blocking the UI thread.
+    pub fn request_lyrics(&mut self, track_id: TrackId) -> Result<(), String> {
+        if self.lyrics_loading_track.is_some() {
+            if self.lyrics_loading_track == Some(track_id) {
+                return Ok(());
+            }
+            return Err("Another lyrics lookup is already in progress.".to_owned());
+        }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        if let Some(cached) = self.lyrics_cache.get(&track_id) {
+            let _ = result_tx.send(Ok(cached.clone()));
+            self.lyrics_result_rx = Some(result_rx);
+            self.lyrics_loading_track = Some(track_id);
+            return Ok(());
+        }
+
+        let track = self
+            .library
+            .get(track_id)
+            .cloned()
+            .ok_or_else(|| "The selected track is no longer in the library.".to_owned())?;
+
+        thread::Builder::new()
+            .name("aurelis-lyrics-lookup".to_owned())
+            .spawn(move || {
+                let lyrics = load_lyrics_for_track(&track).map_err(|error| error.to_string());
+                let _ = result_tx.send(lyrics);
+            })
+            .map_err(|error| format!("Could not start lyrics lookup: {error}"))?;
+
+        self.lyrics_result_rx = Some(result_rx);
+        self.lyrics_loading_track = Some(track_id);
+        Ok(())
+    }
+
+    pub fn poll_lyrics(&mut self) -> Option<(TrackId, Result<Option<Lyrics>, String>)> {
+        let track_id = self.lyrics_loading_track?;
+        let result = match self.lyrics_result_rx.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                self.lyrics_result_rx = None;
+                self.lyrics_loading_track = None;
+                return Some((
+                    track_id,
+                    Err("Lyrics lookup ended unexpectedly.".to_owned()),
+                ));
+            }
+        };
+        self.lyrics_result_rx = None;
+        self.lyrics_loading_track = None;
+        if let Ok(lyrics) = &result {
+            if self.lyrics_cache.len() >= MAX_LYRICS_CACHE_ENTRIES
+                && !self.lyrics_cache.contains_key(&track_id)
+                && let Some(evicted_track_id) = self.lyrics_cache.keys().next().copied()
+            {
+                self.lyrics_cache.remove(&evicted_track_id);
+            }
+            self.lyrics_cache.insert(track_id, lyrics.clone());
+        }
+        Some((track_id, result))
+    }
 }
 
 fn build_library_summaries(library: &MusicLibrary) -> LibrarySummaries {
@@ -629,7 +708,7 @@ mod tests {
 
     use super::{DesktopApplication, TrackSummary, build_library_summaries};
     use aurelis_core::audio::AudioMetadata;
-    use aurelis_core::library::MusicLibrary;
+    use aurelis_core::library::{Lyrics, MusicLibrary, TrackId};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -712,6 +791,71 @@ mod tests {
         assert_eq!(application.tracks()[0].codec, "PCM");
         assert_eq!(application.library_root(), Some(directory.path()));
         assert!(!application.is_scanning());
+    }
+
+    fn wait_for_lyrics(
+        application: &mut DesktopApplication,
+        expected_id: TrackId,
+    ) -> Option<Lyrics> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some((track_id, result)) = application.poll_lyrics() {
+                assert_eq!(track_id, expected_id);
+                return result.expect("load local lyrics");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "lyrics lookup did not complete before the deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn asynchronously_loads_and_caches_local_synced_lyrics() {
+        let directory = TemporaryDirectory::new();
+        let track_path = directory.path().join("Sample Song.flac");
+        fs::write(
+            track_path.with_extension("lrc"),
+            "[00:01.00]First line\n[00:02.50]Second line",
+        )
+        .expect("write LRC sidecar");
+
+        let mut application = DesktopApplication::new();
+        let track_id = application
+            .library
+            .add_track(track_path, AudioMetadata::default());
+
+        application
+            .request_lyrics(track_id)
+            .expect("start lyrics lookup");
+        assert_eq!(application.lyrics_loading_track(), Some(track_id));
+        let lyrics = wait_for_lyrics(&mut application, track_id).expect("synced lyrics");
+        let lines = lyrics.synced_lines().expect("timestamped lines");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].timestamp(), std::time::Duration::from_secs(1));
+        assert_eq!(lines[1].text(), "Second line");
+
+        application
+            .request_lyrics(track_id)
+            .expect("request cached lyrics");
+        assert_eq!(wait_for_lyrics(&mut application, track_id), Some(lyrics));
+    }
+
+    #[test]
+    fn reports_missing_local_lyrics_without_error() {
+        let directory = TemporaryDirectory::new();
+        let mut application = DesktopApplication::new();
+        let track_id = application.library.add_track(
+            directory.path().join("No Lyrics.flac"),
+            AudioMetadata::default(),
+        );
+
+        application
+            .request_lyrics(track_id)
+            .expect("start lyrics lookup");
+
+        assert!(wait_for_lyrics(&mut application, track_id).is_none());
     }
 
     #[test]

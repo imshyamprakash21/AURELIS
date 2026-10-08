@@ -14,7 +14,7 @@ use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
     AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, ArtworkVisual,
     DesktopApplication, DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary,
-    LibrarySearchResults, PlaybackView, TrackId, TrackSummary,
+    LibrarySearchResults, Lyrics, PlaybackView, TrackId, TrackSummary,
 };
 use eframe::egui::{self, Align, Color32, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
@@ -208,6 +208,11 @@ pub(crate) struct AurelisDesktop {
     artwork_caption: String,
     artwork_decode_rx: Option<Receiver<(TrackId, Result<DecodedArtwork, String>)>>,
     seek_preview_seconds: Option<f64>,
+    lyrics_track: Option<TrackId>,
+    lyrics_request_for: Option<TrackId>,
+    lyrics: Option<Lyrics>,
+    lyrics_caption: String,
+    active_lyric_index: Option<usize>,
 }
 
 impl AurelisDesktop {
@@ -237,6 +242,11 @@ impl AurelisDesktop {
                 .to_owned(),
             artwork_decode_rx: None,
             seek_preview_seconds: None,
+            lyrics_track: None,
+            lyrics_request_for: None,
+            lyrics: None,
+            lyrics_caption: "Local lyrics appear here when available.".to_owned(),
+            active_lyric_index: None,
         }
     }
 
@@ -344,6 +354,7 @@ impl AurelisDesktop {
         }
 
         self.sync_artwork(context);
+        self.sync_lyrics();
     }
     fn sync_artwork(&mut self, context: &egui::Context) {
         let current_track = self.application.playback().current_track_id;
@@ -400,6 +411,58 @@ impl AurelisDesktop {
         }
 
         self.poll_artwork_decode(context);
+    }
+
+    fn sync_lyrics(&mut self) {
+        let current_track = self.application.playback().current_track_id;
+        if current_track != self.lyrics_track {
+            self.lyrics_track = current_track;
+            self.lyrics_request_for = None;
+            self.lyrics = None;
+            self.active_lyric_index = None;
+            self.lyrics_caption = if current_track.is_some() {
+                "Loading local lyrics…".to_owned()
+            } else {
+                "Local lyrics appear here when available.".to_owned()
+            };
+        }
+
+        if let Some((track_id, result)) = self.application.poll_lyrics()
+            && Some(track_id) == self.lyrics_track
+        {
+            match result {
+                Ok(Some(lyrics)) => {
+                    self.lyrics = Some(lyrics);
+                    self.lyrics_caption.clear();
+                }
+                Ok(None) => {
+                    self.lyrics = None;
+                    self.lyrics_caption =
+                        "No local lyrics found. Add a same-stem .lrc or .txt sidecar beside the track."
+                            .to_owned();
+                }
+                Err(error) => {
+                    self.lyrics = None;
+                    self.lyrics_caption = format!("Local lyrics could not be loaded: {error}");
+                }
+            }
+        }
+
+        if let Some(track_id) = current_track
+            && self.lyrics_request_for != Some(track_id)
+            && self.application.lyrics_loading_track().is_none()
+        {
+            match self.application.request_lyrics(track_id) {
+                Ok(()) => {
+                    self.lyrics_request_for = Some(track_id);
+                    self.lyrics_caption = "Loading local lyrics…".to_owned();
+                }
+                Err(error) => {
+                    self.lyrics_request_for = Some(track_id);
+                    self.lyrics_caption = format!("Local lyrics could not be loaded: {error}");
+                }
+            }
+        }
     }
 
     fn decode_artwork(&mut self, context: &egui::Context, track_id: TrackId, artwork: ArtworkView) {
@@ -1251,6 +1314,86 @@ impl AurelisDesktop {
                 }
             }
         }
+
+        ui.add_space(spacing::GAP_26);
+        section_heading(ui, "LYRICS");
+        ui.add_space(spacing::GAP_8);
+        self.draw_lyrics(ui, track_id, playback.position);
+    }
+
+    fn draw_lyrics(&mut self, ui: &mut egui::Ui, track_id: TrackId, position: Duration) {
+        match self.lyrics.as_ref() {
+            None => {
+                self.active_lyric_index = None;
+                ui.label(
+                    RichText::new(&self.lyrics_caption)
+                        .size(typography::BODY)
+                        .color(MUTED),
+                );
+            }
+            Some(Lyrics::Plain { text }) => {
+                self.active_lyric_index = None;
+                if text.trim().is_empty() {
+                    ui.label(
+                        RichText::new("This local lyrics file is empty.")
+                            .size(typography::BODY)
+                            .color(MUTED),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("plain-lyrics", track_id))
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(text).size(typography::BODY_LARGE).color(TEXT));
+                        });
+                }
+            }
+            Some(Lyrics::Synced { lines }) => {
+                let current_index = current_synced_lyric_index(lines, position);
+                let current_changed = current_index != self.active_lyric_index;
+                self.active_lyric_index = current_index;
+
+                if lines.is_empty() {
+                    ui.label(
+                        RichText::new("No timestamped lyrics are available.")
+                            .size(typography::BODY)
+                            .color(MUTED),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("synced-lyrics", track_id))
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for (index, line) in lines.iter().enumerate() {
+                                let is_current = current_index == Some(index);
+                                let nearby = current_index
+                                    .is_some_and(|current| current.abs_diff(index) <= 1);
+                                let color = if is_current {
+                                    ACCENT
+                                } else if nearby {
+                                    TEXT
+                                } else {
+                                    MUTED
+                                };
+                                let size = if is_current {
+                                    typography::ARTIST_TITLE
+                                } else if nearby {
+                                    typography::BODY_LARGE
+                                } else {
+                                    typography::BODY
+                                };
+                                let text = RichText::new(line.text()).size(size).color(color);
+                                let text = if is_current { text.strong() } else { text };
+                                let response = ui.add(egui::Label::new(text).wrap());
+                                if is_current && current_changed {
+                                    response.scroll_to_me(Some(Align::Center));
+                                }
+                                ui.add_space(spacing::GAP_10);
+                            }
+                        });
+                }
+            }
+        }
     }
 }
 
@@ -1533,6 +1676,15 @@ fn artwork_format_name(format: ArtworkImageFormat) -> &'static str {
     }
 }
 
+fn current_synced_lyric_index(
+    lines: &[aurelis_app::SyncedLyricLine],
+    position: Duration,
+) -> Option<usize> {
+    lines
+        .partition_point(|line| line.timestamp() <= position)
+        .checked_sub(1)
+}
+
 fn sample_artwork_pixels(image: &image::RgbaImage) -> Vec<[u8; 4]> {
     const MAX_SAMPLE_EDGE: usize = 32;
 
@@ -1588,5 +1740,35 @@ mod artwork_tint_tests {
 
         assert_eq!(middle.primary, [50, 70, 90]);
         assert_eq!(middle.accent, [70, 90, 110]);
+    }
+}
+
+#[cfg(test)]
+mod lyric_sync_tests {
+    use super::current_synced_lyric_index;
+    use aurelis_app::Lyrics;
+    use std::time::Duration;
+
+    #[test]
+    fn follows_synced_lyrics_using_the_playback_position() {
+        let lyrics = Lyrics::parse_lrc("[00:01.00]First\n[00:03.00]Second");
+        let lines = lyrics.synced_lines().expect("synced lyrics");
+
+        assert_eq!(
+            current_synced_lyric_index(lines, Duration::from_millis(999)),
+            None
+        );
+        assert_eq!(
+            current_synced_lyric_index(lines, Duration::from_secs(1)),
+            Some(0)
+        );
+        assert_eq!(
+            current_synced_lyric_index(lines, Duration::from_secs(2)),
+            Some(0)
+        );
+        assert_eq!(
+            current_synced_lyric_index(lines, Duration::from_secs(3)),
+            Some(1)
+        );
     }
 }
