@@ -44,7 +44,7 @@ During playback, left/right arrows seek by five seconds; `p` pauses, `r` resumes
 
 The library index is stored under `.aurelis_cache/library-index.json` inside each scanned music folder. It is rebuilt when missing or invalid and is ignored by Git. AURELIS does not require network access or a database for local playback and scanning.
 
-The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. These foundations are not yet exposed as CLI workflows.
+The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. Artwork is loaded lazily from embedded JPEG/PNG data first, then explicit albumart files, then common folder names such as cover, folder, front, album, and artwork; the cache retains hits and misses until cleared. These foundations are not yet exposed as CLI workflows.
 
 ## Known limitation
 

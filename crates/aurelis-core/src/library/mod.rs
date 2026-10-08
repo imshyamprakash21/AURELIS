@@ -8,7 +8,7 @@ mod query;
 mod scanner;
 mod track;
 
-pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
+pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, load_artwork_for_track};
 pub use artwork_visual::{
     ArtworkVisual, ArtworkVisualError, BackgroundGradient, RgbColor, TextContrast,
 };

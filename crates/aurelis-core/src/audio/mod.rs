@@ -1,3 +1,4 @@
+pub mod album_art;
 pub mod channel_converter;
 pub mod decoder_stream;
 pub mod metadata;
@@ -8,6 +9,7 @@ pub mod ring_buffer;
 pub mod stream;
 pub mod types;
 
+pub use album_art::{AlbumArt, ArtworkFormat, ArtworkSource, extract_album_art};
 pub use metadata::AudioMetadata;
 
 pub use playback::{PlaybackEndReason, PlaybackEngine, PlaybackState};
