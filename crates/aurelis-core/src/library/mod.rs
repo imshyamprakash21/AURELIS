@@ -55,8 +55,9 @@ impl MusicLibrary {
     /// The path is stored exactly as provided. This operation performs no
     /// filesystem I/O. If the path already exists in the library, its ID is
     /// retained and only its metadata is replaced.
-    pub fn add_track(&mut self, path: impl Into<PathBuf>, metadata: AudioMetadata) -> TrackId {
+    pub fn add_track(&mut self, path: impl Into<PathBuf>, mut metadata: AudioMetadata) -> TrackId {
         let path = path.into();
+        metadata.normalize();
 
         if let Some(track) = self.tracks.iter_mut().find(|track| track.path() == path) {
             track.replace_metadata(metadata);

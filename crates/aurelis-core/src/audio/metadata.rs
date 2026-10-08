@@ -36,6 +36,16 @@ pub struct AudioMetadata {
 }
 
 impl AudioMetadata {
+    /// Trim harmless boundary whitespace and NUL padding from imported text.
+    pub(crate) fn normalize(&mut self) {
+        normalize_optional_text(&mut self.title);
+        normalize_optional_text(&mut self.artist);
+        normalize_optional_text(&mut self.album);
+        normalize_optional_text(&mut self.album_artist);
+        normalize_optional_text(&mut self.genre);
+        normalize_optional_text(&mut self.year);
+    }
+
     /// Read metadata from an audio file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
         let path = path.as_ref();
@@ -122,6 +132,7 @@ impl AudioMetadata {
             }
         }
 
+        meta.normalize();
         Ok(meta)
     }
 
@@ -136,6 +147,17 @@ impl AudioMetadata {
 
             None => "--:--".to_string(),
         }
+    }
+}
+
+fn normalize_optional_text(value: &mut Option<String>) {
+    let Some(text) = value.take() else {
+        return;
+    };
+    let normalized =
+        text.trim_matches(|character: char| character == '\0' || character.is_whitespace());
+    if !normalized.is_empty() {
+        *value = Some(normalized.to_owned());
     }
 }
 
@@ -226,6 +248,60 @@ mod tests {
         assert!(meta.artist.is_none());
 
         assert_eq!(meta.codec, "");
+    }
+
+    #[test]
+    fn normalize_keeps_regular_metadata_unchanged() {
+        let mut metadata = AudioMetadata {
+            title: Some("A Song".to_owned()),
+            artist: Some("An Artist".to_owned()),
+            ..AudioMetadata::default()
+        };
+
+        metadata.normalize();
+
+        assert_eq!(metadata.title.as_deref(), Some("A Song"));
+        assert_eq!(metadata.artist.as_deref(), Some("An Artist"));
+    }
+
+    #[test]
+    fn normalize_trims_boundary_whitespace_and_trailing_nuls() {
+        let mut metadata = AudioMetadata {
+            title: Some("  Song title\0\0  ".to_owned()),
+            artist: Some("\tArtist  Name\0".to_owned()),
+            ..AudioMetadata::default()
+        };
+
+        metadata.normalize();
+
+        assert_eq!(metadata.title.as_deref(), Some("Song title"));
+        assert_eq!(metadata.artist.as_deref(), Some("Artist  Name"));
+    }
+
+    #[test]
+    fn normalize_turns_empty_text_into_missing_metadata() {
+        let mut metadata = AudioMetadata {
+            album: Some(" \0\t\0 ".to_owned()),
+            year: Some(String::new()),
+            ..AudioMetadata::default()
+        };
+
+        metadata.normalize();
+
+        assert_eq!(metadata.album, None);
+        assert_eq!(metadata.year, None);
+    }
+
+    #[test]
+    fn normalize_preserves_unicode_and_internal_spacing() {
+        let mut metadata = AudioMetadata {
+            title: Some("  東京  と  音楽  ".to_owned()),
+            ..AudioMetadata::default()
+        };
+
+        metadata.normalize();
+
+        assert_eq!(metadata.title.as_deref(), Some("東京  と  音楽"));
     }
 
     #[test]

@@ -216,7 +216,12 @@ fn allocate_id(next_id: &mut u64) -> Option<u64> {
     Some(id)
 }
 
-fn push_cached_track(tracks: &mut Vec<Track>, index: &mut Vec<CachedTrack>, cached: CachedTrack) {
+fn push_cached_track(
+    tracks: &mut Vec<Track>,
+    index: &mut Vec<CachedTrack>,
+    mut cached: CachedTrack,
+) {
+    cached.metadata.normalize();
     tracks.push(Track::new(
         TrackId::new(cached.id),
         cached.path.clone(),

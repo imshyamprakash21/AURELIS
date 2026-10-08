@@ -61,7 +61,7 @@ impl TrackQuery {
 
     /// Match a case-insensitive substring in searchable metadata.
     pub fn search(mut self, text: impl AsRef<str>) -> Self {
-        self.search = Some(text.as_ref().to_lowercase());
+        self.search = Some(normalize(text.as_ref()));
         self
     }
 
@@ -70,7 +70,7 @@ impl TrackQuery {
     /// Uses the track's display artist, including its existing album-artist
     /// and path fallbacks when the corresponding tags are missing.
     pub fn artist(mut self, artist: impl AsRef<str>) -> Self {
-        self.artist = Some(artist.as_ref().to_lowercase());
+        self.artist = Some(normalize(artist.as_ref()));
         self
     }
 
@@ -79,13 +79,13 @@ impl TrackQuery {
     /// Uses the track's display album, including its existing path fallback
     /// when the album tag is missing.
     pub fn album(mut self, album: impl AsRef<str>) -> Self {
-        self.album = Some(album.as_ref().to_lowercase());
+        self.album = Some(normalize(album.as_ref()));
         self
     }
 
     /// Require an exact, case-insensitive genre metadata match.
     pub fn genre(mut self, genre: impl AsRef<str>) -> Self {
-        self.genre = Some(genre.as_ref().to_lowercase());
+        self.genre = Some(normalize(genre.as_ref()));
         self
     }
 
@@ -95,7 +95,7 @@ impl TrackQuery {
     /// stored metadata string, so a date such as `2024-02-01` does not match
     /// the year filter `2024`.
     pub fn year(mut self, year: impl ToString) -> Self {
-        self.year = Some(year.to_string().to_lowercase());
+        self.year = Some(normalize(&year.to_string()));
         self
     }
 
@@ -132,22 +132,22 @@ fn matches(track: &Track, query: &TrackQuery) -> bool {
         && query
             .artist
             .as_deref()
-            .is_none_or(|artist| track.display_artist().to_lowercase() == artist)
+            .is_none_or(|artist| normalize(&track.display_artist()) == artist)
         && query
             .album
             .as_deref()
-            .is_none_or(|album| track.display_album().to_lowercase() == album)
+            .is_none_or(|album| normalize(&track.display_album()) == album)
         && query.genre.as_deref().is_none_or(|genre| {
             metadata
                 .genre
                 .as_deref()
-                .is_some_and(|value| value.to_lowercase() == genre)
+                .is_some_and(|value| normalize(value) == genre)
         })
         && query.year.as_deref().is_none_or(|year| {
             metadata
                 .year
                 .as_deref()
-                .is_some_and(|value| value.to_lowercase() == year)
+                .is_some_and(|value| normalize(value) == year)
         })
 }
 
@@ -162,10 +162,10 @@ fn matches_search(track: &Track, search: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|value| value.to_lowercase().contains(search))
-        || track.display_title().to_lowercase().contains(search)
-        || track.display_artist().to_lowercase().contains(search)
-        || track.display_album().to_lowercase().contains(search)
+    .any(|value| normalize(value).contains(search))
+        || normalize(&track.display_title()).contains(search)
+        || normalize(&track.display_artist()).contains(search)
+        || normalize(&track.display_album()).contains(search)
 }
 
 fn compare_tracks(left: &Track, right: &Track, query: &TrackQuery) -> Ordering {
@@ -193,7 +193,11 @@ fn compare_tracks(left: &Track, right: &Track, query: &TrackQuery) -> Ordering {
 }
 
 fn compare_folded(left: &str, right: &str) -> Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
+    normalize(left).cmp(&normalize(right))
+}
+
+fn normalize(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn compare_optional<T: Ord>(left: &Option<T>, right: &Option<T>) -> Ordering {
@@ -377,6 +381,39 @@ mod tests {
         );
 
         assert_eq!(library.query(&TrackQuery::new().search("café")).len(), 1);
+    }
+
+    #[test]
+    fn search_and_filters_ignore_boundary_whitespace_and_imported_nul_padding() {
+        let mut library = MusicLibrary::new();
+        add_track(
+            &mut library,
+            "song.wav",
+            metadata(
+                Some("  Café\0\0 "),
+                Some(" Beyoncé  Knowles\0"),
+                Some(" Album "),
+                None,
+                Some(" Jazz\t"),
+                Some(" 2024 "),
+                None,
+                None,
+            ),
+        );
+
+        let query = TrackQuery::new()
+            .search(" CAFÉ ")
+            .artist(" Beyoncé  Knowles ")
+            .album(" Album ")
+            .genre(" jazz ")
+            .year(" 2024 ");
+
+        assert_eq!(query_titles(&library, &query), ["Café"]);
+        assert!(
+            library
+                .query(&TrackQuery::new().artist("Beyoncé Knowles"))
+                .is_empty()
+        );
     }
 
     #[test]
