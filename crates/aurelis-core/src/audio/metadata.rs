@@ -3,6 +3,7 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use symphonia::core::{
     io::MediaSourceStream,
     meta::{StandardTagKey, Value},
@@ -11,7 +12,8 @@ use symphonia::core::{
 use symphonia::default::get_probe;
 
 /// Universal metadata object used throughout AURELIS.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AudioMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,

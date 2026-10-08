@@ -17,7 +17,7 @@ pub(super) enum PlaySelection {
 pub(super) fn run(root: &str, selection: PlaySelection) -> Result<(), Box<dyn Error>> {
     let root = Path::new(root);
     let mut library = MusicLibrary::new();
-    let report = library.scan_directory(root);
+    let report = library.scan_directory_cached(root);
 
     println!("AURELIS Library Playback Test");
     println!("==============================");

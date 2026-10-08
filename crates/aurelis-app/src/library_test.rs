@@ -16,7 +16,7 @@ pub(super) fn run(root: impl AsRef<Path>) -> io::Result<()> {
     println!();
     println!("Root: {}", root.display());
 
-    let report = library.scan_directory(root);
+    let report = library.scan_directory_cached(root);
     println!();
     println!("Discovered: {}", report.discovered);
     println!("Added:      {}", report.added);

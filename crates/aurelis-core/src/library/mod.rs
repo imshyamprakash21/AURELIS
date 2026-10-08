@@ -1,5 +1,6 @@
 mod artwork;
 mod grouping;
+mod persistence;
 mod query;
 mod scanner;
 mod track;
@@ -123,6 +124,17 @@ impl MusicLibrary {
     pub fn tracks_by_artist(&self, artist: &str) -> Vec<&Track> {
         grouping::tracks_by_artist(&self.tracks, artist)
     }
+
+    /// Rescan a directory while reusing metadata from the local library index
+    /// for files whose size and modification time have not changed.
+    ///
+    /// The index is stored under `.aurelis_cache` inside `root`. If it is
+    /// missing or invalid, the directory is scanned normally and the index is
+    /// rebuilt. Index read or write failures do not prevent library use.
+    pub fn scan_directory_cached(&mut self, root: impl AsRef<Path>) -> ScanReport {
+        persistence::scan_directory_cached(self, root.as_ref())
+    }
+
     /// Discover and read metadata for supported audio files under `root`.
     ///
     /// Discovery and metadata errors are included in the returned report.

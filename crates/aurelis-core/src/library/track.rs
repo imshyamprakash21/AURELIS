@@ -14,6 +14,10 @@ impl TrackId {
     pub(super) const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    pub(super) const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// A catalog entry for one audio file.

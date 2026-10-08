@@ -17,7 +17,7 @@ const COLUMN_WIDTHS: [usize; 4] = [ID_WIDTH, TITLE_WIDTH, ARTIST_WIDTH, DURATION
 pub(super) fn run(root: &str) {
     let root_path = Path::new(root);
     let mut library = MusicLibrary::new();
-    let report = library.scan_directory(root_path);
+    let report = library.scan_directory_cached(root_path);
 
     let output = match root_scan_issue(&report, root_path) {
         Some(issue) => render_root_error(root_path, issue),

@@ -417,7 +417,7 @@ fn run_query(
 
 fn scan_and_query(root: &str, query: &TrackQuery) -> QueryResults {
     let mut library = MusicLibrary::new();
-    let report = library.scan_directory(root);
+    let report = library.scan_directory_cached(root);
     let track_ids = matching_track_ids(&library, query);
 
     QueryResults {
