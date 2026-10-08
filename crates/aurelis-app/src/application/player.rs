@@ -14,9 +14,10 @@ use crate::{
     input::start_control_reader,
     player_controller::PlaybackControlTarget,
     presentation::player::{
-        finish_position_line, format_progress_line, format_time, print_controls, print_event,
-        print_field, print_now_playing, print_player_screen, print_progress, print_queue,
-        print_queue_position, print_track_details,
+        display_width, finish_position_line, format_progress_line, format_time,
+        player_terminal_width, print_controls, print_event, print_field, print_now_playing,
+        print_player_screen, print_progress, print_queue, print_queue_position,
+        print_track_details,
     },
 };
 
@@ -435,15 +436,16 @@ pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
 
         if !position_line_cleared_near_end && last_position_second != Some(position.as_secs()) {
             let line = format_progress_line(position, engine.total_duration());
+            let line_width = display_width(&line);
+            let clear_width = position_line_width
+                .max(line_width)
+                .min(player_terminal_width());
 
-            print!(
-                "\r{line:<width$}",
-                width = position_line_width.max(line.chars().count(),)
-            );
+            print!("\r{line}{}", " ".repeat(clear_width - line_width));
 
             io::stdout().flush()?;
 
-            position_line_width = line.chars().count();
+            position_line_width = clear_width;
 
             last_position_second = Some(position.as_secs());
         }
