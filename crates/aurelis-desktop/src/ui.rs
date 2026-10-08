@@ -1,8 +1,9 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::components::{
@@ -11,11 +12,11 @@ use crate::components::{
 };
 use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
-    AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, DesktopApplication,
-    DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
-    PlaybackView, TrackId, TrackSummary,
+    AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, ArtworkVisual,
+    DesktopApplication, DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary,
+    LibrarySearchResults, PlaybackView, TrackId, TrackSummary,
 };
-use eframe::egui::{self, Align, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
+use eframe::egui::{self, Align, Color32, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
@@ -137,6 +138,54 @@ struct SelectedCollection {
 struct DecodedArtwork {
     image: ColorImage,
     caption: String,
+    visual: Option<ArtworkVisual>,
+}
+
+#[derive(Clone, Copy)]
+struct ArtworkTint {
+    primary: [u8; 3],
+    accent: [u8; 3],
+}
+
+fn artwork_tint_from_visual(visual: ArtworkVisual) -> ArtworkTint {
+    let dominant = visual.dominant_color();
+    let accent = visual.accent_color();
+    ArtworkTint {
+        primary: [dominant.red(), dominant.green(), dominant.blue()],
+        accent: [accent.red(), accent.green(), accent.blue()],
+    }
+}
+
+fn neutral_artwork_tint() -> ArtworkTint {
+    ArtworkTint {
+        primary: [CANVAS.r(), CANVAS.g(), CANVAS.b()],
+        accent: [ACCENT.r(), ACCENT.g(), ACCENT.b()],
+    }
+}
+
+fn interpolate_artwork_tint(from: ArtworkTint, target: ArtworkTint, amount: f32) -> ArtworkTint {
+    ArtworkTint {
+        primary: mix_rgb(from.primary, target.primary, amount),
+        accent: mix_rgb(from.accent, target.accent, amount),
+    }
+}
+
+fn artwork_background_tint(palette: ArtworkTint) -> Color32 {
+    let canvas = [CANVAS.r(), CANVAS.g(), CANVAS.b()];
+    let color = mix_rgb(canvas, palette.primary, 0.16);
+    Color32::from_rgb(color[0], color[1], color[2])
+}
+
+fn readable_artwork_accent(palette: ArtworkTint) -> Color32 {
+    let text = [TEXT.r(), TEXT.g(), TEXT.b()];
+    let color = mix_rgb(palette.accent, text, 0.34);
+    Color32::from_rgb(color[0], color[1], color[2])
+}
+
+fn mix_rgb(base: [u8; 3], tint: [u8; 3], amount: f32) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        (base[index] as f32 * (1.0 - amount) + tint[index] as f32 * amount).round() as u8
+    })
 }
 
 pub(crate) struct AurelisDesktop {
@@ -152,6 +201,10 @@ pub(crate) struct AurelisDesktop {
     artwork_track: Option<TrackId>,
     artwork_request_for: Option<TrackId>,
     artwork_texture: Option<egui::TextureHandle>,
+    artwork_visual_cache: HashMap<TrackId, ArtworkVisual>,
+    artwork_tint: Option<ArtworkTint>,
+    artwork_transition_from: Option<ArtworkTint>,
+    artwork_transition_started: Option<Instant>,
     artwork_caption: String,
     artwork_decode_rx: Option<Receiver<(TrackId, Result<DecodedArtwork, String>)>>,
     seek_preview_seconds: Option<f64>,
@@ -176,6 +229,10 @@ impl AurelisDesktop {
             artwork_track: None,
             artwork_request_for: None,
             artwork_texture: None,
+            artwork_visual_cache: HashMap::new(),
+            artwork_tint: None,
+            artwork_transition_from: None,
+            artwork_transition_started: None,
             artwork_caption: "Artwork appears here when the selected track has a supported image."
                 .to_owned(),
             artwork_decode_rx: None,
@@ -188,6 +245,43 @@ impl AurelisDesktop {
             text: text.into(),
             tone,
         });
+    }
+
+    fn transition_artwork_tint(&mut self, tint: Option<ArtworkTint>) {
+        if tint.is_none() && self.artwork_tint.is_none() {
+            self.artwork_transition_from = None;
+            self.artwork_transition_started = None;
+            return;
+        }
+
+        let current = self
+            .displayed_artwork_tint()
+            .unwrap_or_else(neutral_artwork_tint);
+        self.artwork_tint = tint;
+        self.artwork_transition_from = Some(current);
+        self.artwork_transition_started = Some(Instant::now());
+    }
+
+    fn displayed_artwork_tint(&mut self) -> Option<ArtworkTint> {
+        let (Some(from), Some(started_at)) = (
+            self.artwork_transition_from,
+            self.artwork_transition_started,
+        ) else {
+            return self.artwork_tint;
+        };
+
+        let elapsed = Instant::now().duration_since(started_at).as_secs_f32();
+        let progress = (elapsed / motion::ANIMATION_SECONDS).clamp(0.0, 1.0);
+        let target = self.artwork_tint.unwrap_or_else(neutral_artwork_tint);
+        let displayed = interpolate_artwork_tint(from, target, progress);
+
+        if progress >= 1.0 {
+            self.artwork_transition_from = None;
+            self.artwork_transition_started = None;
+            self.artwork_tint
+        } else {
+            Some(displayed)
+        }
     }
 
     fn begin_scan(&mut self) {
@@ -222,6 +316,7 @@ impl AurelisDesktop {
     fn accept_scan(&mut self, summary: LibraryScanSummary) {
         self.search_results_stale = true;
         self.selected_collection = None;
+        self.artwork_visual_cache.clear();
         let message = format!(
             "{} supported files found · {} added · {} refreshed · {} unreadable · {} scan issues",
             summary.discovered, summary.added, summary.updated, summary.failed, summary.issues,
@@ -257,6 +352,11 @@ impl AurelisDesktop {
             self.artwork_request_for = None;
             self.artwork_texture = None;
             self.artwork_decode_rx = None;
+            if current_track.is_none() {
+                self.artwork_tint = None;
+                self.artwork_transition_from = None;
+                self.artwork_transition_started = None;
+            }
             self.artwork_caption = if current_track.is_some() {
                 "Loading artwork…".to_owned()
             } else {
@@ -271,10 +371,12 @@ impl AurelisDesktop {
             match result {
                 Ok(Some(artwork)) => self.decode_artwork(context, track_id, artwork),
                 Ok(None) => {
+                    self.transition_artwork_tint(None);
                     self.artwork_caption =
                         "No supported embedded or folder artwork was found.".to_owned();
                 }
                 Err(error) => {
+                    self.transition_artwork_tint(None);
                     self.artwork_caption = format!("Artwork could not be loaded: {error}");
                 }
             }
@@ -291,6 +393,7 @@ impl AurelisDesktop {
                 }
                 Err(error) => {
                     self.artwork_request_for = Some(track_id);
+                    self.transition_artwork_tint(None);
                     self.artwork_caption = error;
                 }
             }
@@ -306,6 +409,7 @@ impl AurelisDesktop {
             artwork_format_name(artwork.format),
             artwork.source
         );
+        let cached_visual = self.artwork_visual_cache.get(&track_id).copied();
 
         match thread::Builder::new()
             .name("aurelis-artwork-decode".to_owned())
@@ -313,9 +417,17 @@ impl AurelisDesktop {
                 let result = image::load_from_memory(&artwork.data)
                     .map(|decoded| {
                         let rgba = decoded.to_rgba8();
+                        let visual = cached_visual.or_else(|| {
+                            let sample = sample_artwork_pixels(&rgba);
+                            ArtworkVisual::from_rgba_pixels(&sample).ok()
+                        });
                         let size = [rgba.width() as usize, rgba.height() as usize];
                         let image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                        DecodedArtwork { image, caption }
+                        DecodedArtwork {
+                            image,
+                            caption,
+                            visual,
+                        }
                     })
                     .map_err(|error| error.to_string());
                 let _ = result_tx.send((track_id, result));
@@ -326,6 +438,7 @@ impl AurelisDesktop {
                 context.request_repaint();
             }
             Err(error) => {
+                self.transition_artwork_tint(None);
                 self.artwork_caption = format!("Could not start artwork decoding: {error}");
             }
         }
@@ -342,6 +455,12 @@ impl AurelisDesktop {
                 }
                 match result {
                     Ok(decoded) => {
+                        if let Some(visual) = decoded.visual {
+                            self.artwork_visual_cache.insert(track_id, visual);
+                            self.transition_artwork_tint(Some(artwork_tint_from_visual(visual)));
+                        } else {
+                            self.transition_artwork_tint(None);
+                        }
                         self.artwork_texture = Some(context.load_texture(
                             format!("aurelis-artwork-{track_id:?}"),
                             decoded.image,
@@ -350,13 +469,15 @@ impl AurelisDesktop {
                         self.artwork_caption = decoded.caption;
                     }
                     Err(error) => {
+                        self.transition_artwork_tint(None);
                         self.artwork_caption = format!("Artwork could not be rendered: {error}");
                     }
                 }
             }
             Err(TryRecvError::Empty) => self.artwork_decode_rx = Some(receiver),
             Err(TryRecvError::Disconnected) => {
-                self.artwork_caption = "Artwork rendering ended unexpectedly.".to_owned();
+                self.transition_artwork_tint(None);
+                self.artwork_caption = "Artwork decoding ended unexpectedly.".to_owned();
             }
         }
     }
@@ -919,6 +1040,11 @@ impl AurelisDesktop {
         }
     }
     fn draw_now_playing(&mut self, ui: &mut egui::Ui) {
+        let artwork_tint = self.displayed_artwork_tint();
+        if let Some(tint) = artwork_tint {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, artwork_background_tint(tint));
+        }
         ui.add_space(spacing::GAP_34);
         ui.label(
             RichText::new("AURELIS CORE")
@@ -994,7 +1120,7 @@ impl AurelisDesktop {
                 ui.label(
                     RichText::new(&track.artist)
                         .size(typography::ARTIST_TITLE)
-                        .color(ACCENT),
+                        .color(artwork_tint.map_or(ACCENT, readable_artwork_accent)),
                 );
                 ui.add_space(spacing::GAP_4);
                 ui.label(
@@ -1404,5 +1530,63 @@ fn artwork_format_name(format: ArtworkImageFormat) -> &'static str {
     match format {
         ArtworkImageFormat::Jpeg => "JPEG",
         ArtworkImageFormat::Png => "PNG",
+    }
+}
+
+fn sample_artwork_pixels(image: &image::RgbaImage) -> Vec<[u8; 4]> {
+    const MAX_SAMPLE_EDGE: usize = 32;
+
+    let x_step = image.width().div_ceil(MAX_SAMPLE_EDGE as u32).max(1) as usize;
+    let y_step = image.height().div_ceil(MAX_SAMPLE_EDGE as u32).max(1) as usize;
+    let mut sample = Vec::with_capacity(MAX_SAMPLE_EDGE * MAX_SAMPLE_EDGE);
+
+    for y in (0..image.height()).step_by(y_step) {
+        for x in (0..image.width()).step_by(x_step) {
+            sample.push(image.get_pixel(x, y).0);
+        }
+    }
+
+    sample
+}
+
+#[cfg(test)]
+mod artwork_tint_tests {
+    use super::{ArtworkTint, interpolate_artwork_tint, sample_artwork_pixels};
+    use aurelis_app::ArtworkVisual;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn sampled_pixels_are_bounded_and_use_the_core_artwork_visual_model() {
+        let image = RgbaImage::from_fn(128, 96, |x, _| {
+            if x < 96 {
+                Rgba([220, 40, 50, 255])
+            } else {
+                Rgba([40, 60, 220, 255])
+            }
+        });
+
+        let sample = sample_artwork_pixels(&image);
+        let visual = ArtworkVisual::from_rgba_pixels(&sample).expect("artwork visual");
+
+        assert_eq!(sample.len(), 32 * 32);
+        assert!(visual.dominant_color().red() > visual.dominant_color().blue());
+        assert!(visual.accent_color().blue() > visual.accent_color().red());
+    }
+
+    #[test]
+    fn artwork_transition_interpolates_background_and_accent_tints() {
+        let start = ArtworkTint {
+            primary: [0, 20, 40],
+            accent: [20, 40, 60],
+        };
+        let target = ArtworkTint {
+            primary: [100, 120, 140],
+            accent: [120, 140, 160],
+        };
+
+        let middle = interpolate_artwork_tint(start, target, 0.5);
+
+        assert_eq!(middle.primary, [50, 70, 90]);
+        assert_eq!(middle.accent, [70, 90, 110]);
     }
 }

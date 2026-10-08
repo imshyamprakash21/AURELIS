@@ -2,7 +2,7 @@
 
 AURELIS is a local-first Rust music player and library toolkit. AURELIS includes a native desktop player and a terminal diagnostic interface. Both use the same Rust audio engine, library scanner, artwork cache, and application playback controller.
 
-The project is version `0.1.0` and remains under active development. The core crate handles audio playback. The application crate provides library and playback workflows, command routing, terminal input, and shared presentation helpers; the desktop crate provides the native window and its UI.
+The project is version `0.1.0` and remains under active development. The core crate handles audio playback and the artwork visual model. The application crate provides library and playback workflows, command routing, terminal input, and shared presentation helpers; the desktop crate provides the native window, UI, and nonblocking artwork presentation.
 
 ## Build and test
 
@@ -47,7 +47,7 @@ During playback, left/right arrows seek by five seconds; `p` pauses, `r` resumes
 
 The library index is stored under `.aurelis_cache/library-index.json` inside each scanned music folder. It is rebuilt when missing or invalid and is ignored by Git. AURELIS does not require network access or a database for local playback and scanning.
 
-The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. Artwork is loaded lazily from embedded JPEG/PNG data first, then explicit albumart files, then common folder names such as cover, folder, front, album, and artwork; the cache retains hits and misses until cleared. During library playback, the now-playing screen and status report artwork availability, format, and source filename (or embedded source). Missing artwork uses a text fallback. The terminal reports artwork metadata without drawing image pixels.
+The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. Artwork is loaded lazily from embedded JPEG/PNG data first, then explicit albumart files, then common folder names such as cover, folder, front, album, and artwork; the cache retains hits and misses until cleared. The desktop presentation decodes artwork off the UI thread and passes a bounded pixel sample to the core visual model, caching each track's derived visual for the current library. Now Playing uses the resulting dominant and accent colors for a subtle background tint and artist accent, transitioning over 200 ms when artwork changes. Missing or invalid artwork returns to the fixed AURELIS theme. The screen reports artwork availability, format, and source filename (or embedded source); the terminal reports artwork metadata without drawing image pixels.
 
 ## Known limitation
 
