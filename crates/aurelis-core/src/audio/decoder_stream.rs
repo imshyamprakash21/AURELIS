@@ -391,12 +391,103 @@ fn timestamp_to_frames(timestamp: u64, time_base: TimeBase, sample_rate: u32) ->
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
     use super::*;
+
+    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("aurelis-decoder-{}-{sequence}", std::process::id()));
+            fs::create_dir_all(&path).expect("create decoder test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_pcm_wav(path: &Path, sample_rate: u32, samples: &[i16]) {
+        let data_len = (samples.len() * 2) as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("write decoder test WAV file");
+    }
 
     #[test]
     fn rejects_zero_chunk_size() {
         let result = AudioDecoder::open_with_chunk_size("nonexistent.flac", 0);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decodes_across_chunk_boundaries_and_finishes_cleanly() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.path().join("chunked.wav");
+        let source_samples = [
+            1000, -2000, 3000, -4000, 5000, -6000, 7000, -8000, 9000, -10000,
+        ];
+        write_pcm_wav(&path, 8_000, &source_samples);
+
+        let mut decoder = AudioDecoder::open_with_chunk_size(&path, 4).expect("open WAV decoder");
+        assert_eq!(decoder.spec(), AudioSpec::new(8_000, 1));
+
+        let mut chunk_sizes = Vec::new();
+        let mut decoded_samples = Vec::new();
+        while let Some(chunk) = decoder.next_chunk().expect("decode next WAV chunk") {
+            chunk_sizes.push(chunk.frame_count());
+            decoded_samples.extend(chunk.samples);
+        }
+
+        assert_eq!(chunk_sizes, [4, 4, 2]);
+        assert_eq!(decoded_samples.len(), source_samples.len());
+        assert!(decoded_samples.iter().any(|sample| *sample != 0.0));
+        assert!(decoder.is_finished());
+        assert!(
+            decoder
+                .next_chunk()
+                .expect("read after end of stream")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_audio_file() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.path().join("broken.wav");
+        fs::write(&path, b"not a valid audio file").expect("write malformed audio file");
+
+        assert!(AudioDecoder::open(&path).is_err());
     }
 }

@@ -105,3 +105,30 @@ fn read_windows_console_keys(command_tx: mpsc::Sender<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_control_line;
+
+    #[test]
+    fn ignores_empty_control_lines() {
+        assert_eq!(normalize_control_line(""), None);
+        assert_eq!(normalize_control_line("  	 "), None);
+    }
+
+    #[test]
+    fn normalizes_left_and_right_arrow_sequences() {
+        for line in ["\u{1b}[D", "\u{1b}OD", "  LEFT  "] {
+            assert_eq!(normalize_control_line(line).as_deref(), Some("left"));
+        }
+        for line in ["\u{1b}[C", "\u{1b}OC", "  RIGHT  "] {
+            assert_eq!(normalize_control_line(line).as_deref(), Some("right"));
+        }
+    }
+
+    #[test]
+    fn trims_and_lowercases_named_commands() {
+        assert_eq!(normalize_control_line("  NEXT  ").as_deref(), Some("next"));
+        assert_eq!(normalize_control_line(" Q ").as_deref(), Some("q"));
+    }
+}
