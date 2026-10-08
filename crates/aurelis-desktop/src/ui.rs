@@ -1,17 +1,19 @@
 use std::{
+    borrow::Cow,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
 };
 
 use crate::components::{
-    BannerMessage, MessageTone, artwork_fallback, draw_message, empty_state, format_time,
-    metadata_row, navigation_button, section_heading, track_row,
+    BannerMessage, MessageTone, artwork_fallback, collection_row, draw_message, empty_state,
+    format_time, library_statistic, metadata_row, navigation_button, section_heading, track_row,
 };
 use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
-    ArtworkImageFormat, ArtworkView, DesktopApplication, DesktopPlaybackState, LibraryScanSummary,
-    PlaybackView, TrackId,
+    AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, DesktopApplication,
+    DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
+    PlaybackView, TrackId, TrackSummary,
 };
 use eframe::egui::{self, Align, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
@@ -19,6 +21,117 @@ use eframe::egui::{self, Align, ColorImage, Frame, Layout, RichText, Stroke, Vec
 enum Page {
     Library,
     NowPlaying,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LibrarySection {
+    Home,
+    Tracks,
+    Albums,
+    Artists,
+    Genres,
+    Folders,
+}
+
+impl LibrarySection {
+    const ALL: [Self; 6] = [
+        Self::Home,
+        Self::Tracks,
+        Self::Albums,
+        Self::Artists,
+        Self::Genres,
+        Self::Folders,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Tracks => "Tracks",
+            Self::Albums => "Albums",
+            Self::Artists => "Artists",
+            Self::Genres => "Genres",
+            Self::Folders => "Folders",
+        }
+    }
+}
+
+trait BrowseGroup {
+    fn title(&self) -> Cow<'_, str>;
+    fn subtitle(&self) -> Cow<'_, str>;
+    fn track_ids(&self) -> &[TrackId];
+}
+
+impl BrowseGroup for AlbumSummary {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.title)
+    }
+
+    fn subtitle(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.album_artist)
+    }
+
+    fn track_ids(&self) -> &[TrackId] {
+        &self.track_ids
+    }
+}
+
+impl BrowseGroup for ArtistSummary {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.name)
+    }
+
+    fn subtitle(&self) -> Cow<'_, str> {
+        Cow::Borrowed("Artist")
+    }
+
+    fn track_ids(&self) -> &[TrackId] {
+        &self.track_ids
+    }
+}
+
+impl BrowseGroup for GenreSummary {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.name)
+    }
+
+    fn subtitle(&self) -> Cow<'_, str> {
+        Cow::Borrowed("Genre")
+    }
+
+    fn track_ids(&self) -> &[TrackId] {
+        &self.track_ids
+    }
+}
+
+impl BrowseGroup for FolderSummary {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.name)
+    }
+
+    fn subtitle(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.display_path)
+    }
+
+    fn track_ids(&self) -> &[TrackId] {
+        &self.track_ids
+    }
+}
+
+struct CollectionTarget {
+    title: String,
+    subtitle: String,
+    track_ids: Vec<TrackId>,
+}
+
+enum SearchSelection {
+    Track(TrackId),
+    Collection(CollectionTarget),
+}
+
+struct SelectedCollection {
+    title: String,
+    subtitle: String,
+    tracks: Vec<TrackSummary>,
 }
 
 struct DecodedArtwork {
@@ -30,6 +143,11 @@ pub(crate) struct AurelisDesktop {
     application: DesktopApplication,
     page: Page,
     library_path: String,
+    library_section: LibrarySection,
+    library_search: String,
+    search_results: LibrarySearchResults,
+    search_results_stale: bool,
+    selected_collection: Option<SelectedCollection>,
     message: Option<BannerMessage>,
     artwork_track: Option<TrackId>,
     artwork_request_for: Option<TrackId>,
@@ -46,6 +164,11 @@ impl AurelisDesktop {
             application: DesktopApplication::new(),
             page: Page::Library,
             library_path: String::new(),
+            library_section: LibrarySection::Home,
+            library_search: String::new(),
+            search_results: LibrarySearchResults::default(),
+            search_results_stale: true,
+            selected_collection: None,
             message: Some(BannerMessage {
                 text: "Choose a local music folder to build your library.".to_owned(),
                 tone: MessageTone::Info,
@@ -97,6 +220,8 @@ impl AurelisDesktop {
     }
 
     fn accept_scan(&mut self, summary: LibraryScanSummary) {
+        self.search_results_stale = true;
+        self.selected_collection = None;
         let message = format!(
             "{} supported files found · {} added · {} refreshed · {} unreadable · {} scan issues",
             summary.discovered, summary.added, summary.updated, summary.failed, summary.issues,
@@ -563,29 +688,127 @@ impl AurelisDesktop {
             draw_message(ui, message);
         }
 
-        ui.add_space(spacing::GAP_18);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} tracks", self.application.tracks().len()))
-                    .size(typography::BODY)
-                    .strong()
-                    .color(TEXT),
-            );
-            ui.add_space(spacing::GAP_8);
-            ui.label(
-                RichText::new("TITLE")
-                    .size(typography::OVERLINE)
-                    .strong()
-                    .color(MUTED),
-            );
-            ui.label(
-                RichText::new("·  ARTIST  ·  ALBUM")
-                    .size(typography::OVERLINE)
-                    .color(MUTED),
-            );
-        });
-        ui.add_space(spacing::GAP_8);
+        ui.add_space(spacing::GAP_16);
+        let search_response = ui.add(
+            egui::TextEdit::singleline(&mut self.library_search)
+                .desired_width(ui.available_width())
+                .hint_text("Search tracks, artists, albums, or genres"),
+        );
+        if search_response.changed() {
+            self.search_results_stale = true;
+            self.selected_collection = None;
+        }
 
+        if !self.library_search.trim().is_empty() {
+            if self.search_results_stale {
+                self.search_results = self.application.search_library(&self.library_search);
+                self.search_results_stale = false;
+            }
+            ui.add_space(spacing::GAP_12);
+            ui.label(
+                RichText::new(format!(
+                    "{} tracks · {} albums · {} artists · {} genres",
+                    self.search_results.tracks.len(),
+                    self.search_results.albums.len(),
+                    self.search_results.artists.len(),
+                    self.search_results.genres.len(),
+                ))
+                .size(typography::BODY)
+                .strong()
+                .color(TEXT),
+            );
+            let current_track = self.application.playback().current_track_id;
+            if let Some(collection) = self.selected_collection.as_ref() {
+                if ui.button("← Back to search results").clicked() {
+                    self.selected_collection = None;
+                    return;
+                }
+                section_heading(ui, &collection.title);
+                ui.label(
+                    RichText::new(&collection.subtitle)
+                        .size(typography::BODY_SMALL)
+                        .color(MUTED),
+                );
+                if let Some(track_id) = render_track_list(ui, &collection.tracks, current_track) {
+                    self.play_selected_track(track_id);
+                }
+            } else if self.search_results.tracks.is_empty()
+                && self.search_results.albums.is_empty()
+                && self.search_results.artists.is_empty()
+                && self.search_results.genres.is_empty()
+            {
+                empty_state(
+                    ui,
+                    "No matching music",
+                    "Try another title, artist, album, or genre.",
+                );
+            } else if let Some(selection) =
+                render_search_results(ui, &self.search_results, current_track)
+            {
+                match selection {
+                    SearchSelection::Track(track_id) => self.play_selected_track(track_id),
+                    SearchSelection::Collection(target) => self.open_collection(target),
+                }
+            }
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            for section in LibrarySection::ALL {
+                if ui
+                    .selectable_label(self.library_section == section, section.label())
+                    .clicked()
+                {
+                    self.library_section = section;
+                    self.selected_collection = None;
+                }
+            }
+        });
+
+        if self.selected_collection.is_some() {
+            if ui
+                .button(format!("← Back to {}", self.library_section.label()))
+                .clicked()
+            {
+                self.selected_collection = None;
+                return;
+            }
+            let current_track = self.application.playback().current_track_id;
+            let selected_track = if let Some(collection) = self.selected_collection.as_ref() {
+                section_heading(ui, &collection.title);
+                ui.label(
+                    RichText::new(&collection.subtitle)
+                        .size(typography::BODY_SMALL)
+                        .color(MUTED),
+                );
+                render_track_list(ui, &collection.tracks, current_track)
+            } else {
+                None
+            };
+            if let Some(track_id) = selected_track {
+                self.play_selected_track(track_id);
+            }
+            return;
+        }
+
+        match self.library_section {
+            LibrarySection::Home => self.draw_library_home(ui),
+            LibrarySection::Tracks => {
+                let current_track = self.application.playback().current_track_id;
+                if let Some(track_id) =
+                    render_track_list(ui, self.application.tracks(), current_track)
+                {
+                    self.play_selected_track(track_id);
+                }
+            }
+            LibrarySection::Albums => self.draw_album_groups(ui),
+            LibrarySection::Artists => self.draw_artist_groups(ui),
+            LibrarySection::Genres => self.draw_genre_groups(ui),
+            LibrarySection::Folders => self.draw_folder_groups(ui),
+        }
+    }
+
+    fn draw_library_home(&self, ui: &mut egui::Ui) {
         if self.application.tracks().is_empty() {
             empty_state(
                 ui,
@@ -595,27 +818,104 @@ impl AurelisDesktop {
             return;
         }
 
-        let current_track = self.application.playback().current_track_id;
-        let mut selected_track = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (index, track) in self.application.tracks().iter().enumerate() {
-                    if track_row(ui, index, track, current_track) {
-                        selected_track = Some(track.id);
-                    }
+        ui.add_space(spacing::GAP_18);
+        section_heading(ui, "LIBRARY OVERVIEW");
+        ui.add_space(spacing::GAP_8);
+        ui.horizontal_wrapped(|ui| {
+            library_statistic(ui, "Tracks", self.application.tracks().len());
+            library_statistic(ui, "Albums", self.application.albums().len());
+            library_statistic(ui, "Artists", self.application.artists().len());
+            library_statistic(ui, "Genres", self.application.genres().len());
+            library_statistic(ui, "Folders", self.application.folders().len());
+        });
+    }
+
+    fn draw_album_groups(&mut self, ui: &mut egui::Ui) {
+        let groups = self.application.albums();
+        if groups.is_empty() {
+            empty_state(
+                ui,
+                "No album groups",
+                "Scan a folder with tagged or organized music.",
+            );
+            return;
+        }
+        section_heading(ui, "ALBUMS");
+        if let Some(target) = render_group_list(ui, groups) {
+            self.open_collection(target);
+        }
+    }
+
+    fn draw_artist_groups(&mut self, ui: &mut egui::Ui) {
+        let groups = self.application.artists();
+        if groups.is_empty() {
+            empty_state(
+                ui,
+                "No artist groups",
+                "Scan a folder containing audio tracks.",
+            );
+            return;
+        }
+        section_heading(ui, "ARTISTS");
+        if let Some(target) = render_group_list(ui, groups) {
+            self.open_collection(target);
+        }
+    }
+
+    fn draw_genre_groups(&mut self, ui: &mut egui::Ui) {
+        let groups = self.application.genres();
+        if groups.is_empty() {
+            empty_state(
+                ui,
+                "No genre tags",
+                "Genre groups appear when tracks include genre metadata.",
+            );
+            return;
+        }
+        section_heading(ui, "GENRES");
+        if let Some(target) = render_group_list(ui, groups) {
+            self.open_collection(target);
+        }
+    }
+
+    fn draw_folder_groups(&mut self, ui: &mut egui::Ui) {
+        let groups = self.application.folders();
+        if groups.is_empty() {
+            empty_state(
+                ui,
+                "No folders",
+                "Scan a local music folder to browse its files.",
+            );
+            return;
+        }
+        section_heading(ui, "FOLDERS");
+        if let Some(target) = render_group_list(ui, groups) {
+            self.open_collection(target);
+        }
+    }
+
+    fn open_collection(&mut self, target: CollectionTarget) {
+        let tracks = target
+            .track_ids
+            .iter()
+            .filter_map(|track_id| self.application.track(*track_id).cloned())
+            .collect();
+        self.selected_collection = Some(SelectedCollection {
+            title: target.title,
+            subtitle: target.subtitle,
+            tracks,
+        });
+    }
+
+    fn play_selected_track(&mut self, track_id: TrackId) {
+        match self.application.play_track(track_id) {
+            Ok(()) => {
+                self.page = Page::NowPlaying;
+                if let Some(track) = self.application.track(track_id) {
+                    self.show_message(format!("Playing {}", track.title), MessageTone::Success);
                 }
-            });
-        if let Some(track_id) = selected_track {
-            match self.application.play_track(track_id) {
-                Ok(()) => {
-                    self.page = Page::NowPlaying;
-                    if let Some(track) = self.application.track(track_id) {
-                        self.show_message(format!("Playing {}", track.title), MessageTone::Success);
-                    }
-                }
-                Err(error) => self.show_message(error, MessageTone::Error),
             }
+            Err(error) => self.show_message(error, MessageTone::Error),
         }
     }
     fn draw_now_playing(&mut self, ui: &mut egui::Ui) {
@@ -878,6 +1178,132 @@ impl eframe::App for AurelisDesktop {
 
         context.request_repaint_after(Duration::from_millis(motion::FRAME_REFRESH_MS));
     }
+}
+fn render_track_list(
+    ui: &mut egui::Ui,
+    tracks: &[TrackSummary],
+    current_track: Option<TrackId>,
+) -> Option<TrackId> {
+    if tracks.is_empty() {
+        empty_state(
+            ui,
+            "No tracks in this view",
+            "Try another library section or search.",
+        );
+        return None;
+    }
+
+    ui.add_space(spacing::GAP_12);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{} tracks", tracks.len()))
+                .size(typography::BODY)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(spacing::GAP_8);
+        ui.label(
+            RichText::new("TITLE")
+                .size(typography::OVERLINE)
+                .strong()
+                .color(MUTED),
+        );
+        ui.label(
+            RichText::new("·  ARTIST  ·  ALBUM")
+                .size(typography::OVERLINE)
+                .color(MUTED),
+        );
+    });
+    ui.add_space(spacing::GAP_8);
+
+    let mut selected_track = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (index, track) in tracks.iter().enumerate() {
+                if track_row(ui, index, track, current_track) {
+                    selected_track = Some(track.id);
+                }
+            }
+        });
+    selected_track
+}
+
+fn render_group_list<T: BrowseGroup>(ui: &mut egui::Ui, groups: &[T]) -> Option<CollectionTarget> {
+    let mut selected = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            selected = render_group_rows(ui, groups);
+        });
+    selected
+}
+
+fn render_group_rows<T: BrowseGroup>(ui: &mut egui::Ui, groups: &[T]) -> Option<CollectionTarget> {
+    for group in groups {
+        let title = group.title();
+        let subtitle = group.subtitle();
+        if collection_row(
+            ui,
+            title.as_ref(),
+            subtitle.as_ref(),
+            group.track_ids().len(),
+        ) {
+            return Some(CollectionTarget {
+                title: title.into_owned(),
+                subtitle: subtitle.into_owned(),
+                track_ids: group.track_ids().to_vec(),
+            });
+        }
+        ui.add_space(spacing::GAP_5);
+    }
+    None
+}
+
+fn render_search_results(
+    ui: &mut egui::Ui,
+    results: &LibrarySearchResults,
+    current_track: Option<TrackId>,
+) -> Option<SearchSelection> {
+    let mut selection = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if !results.tracks.is_empty() {
+                section_heading(ui, "TRACKS");
+                for (index, track) in results.tracks.iter().enumerate() {
+                    if track_row(ui, index, track, current_track) {
+                        selection = Some(SearchSelection::Track(track.id));
+                    }
+                }
+                ui.add_space(spacing::GAP_12);
+            }
+
+            if !results.artists.is_empty() {
+                section_heading(ui, "ARTISTS");
+                let target = render_group_rows(ui, &results.artists);
+                if selection.is_none() {
+                    selection = target.map(SearchSelection::Collection);
+                }
+                ui.add_space(spacing::GAP_12);
+            }
+            if !results.albums.is_empty() {
+                section_heading(ui, "ALBUMS");
+                let target = render_group_rows(ui, &results.albums);
+                if selection.is_none() {
+                    selection = target.map(SearchSelection::Collection);
+                }
+                ui.add_space(spacing::GAP_12);
+            }
+            if !results.genres.is_empty() {
+                section_heading(ui, "GENRES");
+                let target = render_group_rows(ui, &results.genres);
+                if selection.is_none() {
+                    selection = target.map(SearchSelection::Collection);
+                }
+            }
+        });
+    selection
 }
 #[derive(Clone, Copy)]
 enum TransportAction {

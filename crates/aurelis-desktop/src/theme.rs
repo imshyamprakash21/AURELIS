@@ -68,6 +68,8 @@ pub(crate) mod layout {
     pub(crate) const TRACK_ROW_BUTTON_HEIGHT: f32 = 38.0;
     pub(crate) const EMPTY_STATE_MIN_HEIGHT: f32 = 170.0;
     pub(crate) const WIDE_LIBRARY_BREAKPOINT: f32 = 900.0;
+    pub(crate) const COLLECTION_ROW_HEIGHT: f32 = 54.0;
+    pub(crate) const STATISTIC_CARD_MIN_WIDTH: f32 = 112.0;
     pub(crate) const BORDER_WIDTH: f32 = 1.0;
 
     pub(crate) const NAVIGATION_INSET: i8 = 22;

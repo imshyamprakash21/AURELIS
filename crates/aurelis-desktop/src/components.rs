@@ -139,6 +139,45 @@ pub(crate) fn track_row(
     play
 }
 
+pub(crate) fn collection_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    track_count: usize,
+) -> bool {
+    let label = format!(
+        "{title}
+{subtitle} · {track_count} tracks"
+    );
+    ui.add_sized(
+        [ui.available_width(), layout::COLLECTION_ROW_HEIGHT],
+        egui::Button::new(
+            RichText::new(label)
+                .size(typography::BODY_SMALL)
+                .color(TEXT),
+        )
+        .fill(SURFACE)
+        .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE)),
+    )
+    .clicked()
+}
+
+pub(crate) fn library_statistic(ui: &mut egui::Ui, label: &str, count: usize) {
+    Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+        .inner_margin(egui::Margin::same(layout::CARD_INSET))
+        .show(ui, |ui| {
+            ui.set_min_width(layout::STATISTIC_CARD_MIN_WIDTH);
+            ui.label(RichText::new(label).size(typography::CAPTION).color(MUTED));
+            ui.label(
+                RichText::new(count.to_string())
+                    .size(typography::TITLE)
+                    .strong()
+                    .color(TEXT),
+            );
+        });
+}
 pub(crate) fn empty_state(ui: &mut egui::Ui, title: &str, description: &str) {
     ui.add_space(spacing::GAP_58);
     Frame::new()

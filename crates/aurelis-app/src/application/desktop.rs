@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -9,7 +10,8 @@ use std::{
 };
 
 use aurelis_core::library::{
-    Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, MusicLibrary, Track, TrackId,
+    Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, MusicLibrary, Track,
+    TrackId, TrackQuery,
 };
 
 use crate::player_controller::{PlaybackControlTarget, PlaybackStatus, PlayerController};
@@ -99,6 +101,41 @@ impl From<&Track> for TrackSummary {
 }
 
 #[derive(Clone, Debug)]
+pub struct AlbumSummary {
+    pub title: String,
+    pub album_artist: String,
+    pub track_ids: Vec<TrackId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArtistSummary {
+    pub name: String,
+    pub track_ids: Vec<TrackId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenreSummary {
+    pub name: String,
+    pub track_ids: Vec<TrackId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FolderSummary {
+    pub path: PathBuf,
+    pub name: String,
+    pub display_path: String,
+    pub track_ids: Vec<TrackId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LibrarySearchResults {
+    pub tracks: Vec<TrackSummary>,
+    pub albums: Vec<AlbumSummary>,
+    pub artists: Vec<ArtistSummary>,
+    pub genres: Vec<GenreSummary>,
+}
+
+#[derive(Clone, Debug)]
 pub struct PlaybackView {
     pub current_track_id: Option<TrackId>,
     pub state: DesktopPlaybackState,
@@ -121,12 +158,25 @@ struct ScanResult {
     root: PathBuf,
     library: MusicLibrary,
     summary: LibraryScanSummary,
+    summaries: LibrarySummaries,
+}
+
+struct LibrarySummaries {
+    tracks: Vec<TrackSummary>,
+    albums: Vec<AlbumSummary>,
+    artists: Vec<ArtistSummary>,
+    genres: Vec<GenreSummary>,
+    folders: Vec<FolderSummary>,
 }
 
 /// Application facade used by the native desktop presentation.
 pub struct DesktopApplication {
     library: MusicLibrary,
     tracks: Vec<TrackSummary>,
+    albums: Vec<AlbumSummary>,
+    artists: Vec<ArtistSummary>,
+    genres: Vec<GenreSummary>,
+    folders: Vec<FolderSummary>,
     player: PlayerController,
     artwork_cache: Arc<Mutex<ArtworkCache>>,
     artwork_result_rx: Option<Receiver<Result<Option<Arc<Artwork>>, String>>>,
@@ -141,6 +191,10 @@ impl DesktopApplication {
         Self {
             library: MusicLibrary::new(),
             tracks: Vec::new(),
+            albums: Vec::new(),
+            artists: Vec::new(),
+            genres: Vec::new(),
+            folders: Vec::new(),
             player: PlayerController::new(),
             artwork_cache: Arc::new(Mutex::new(ArtworkCache::new())),
             artwork_result_rx: None,
@@ -156,6 +210,86 @@ impl DesktopApplication {
 
     pub fn track(&self, track_id: TrackId) -> Option<&TrackSummary> {
         self.tracks.iter().find(|track| track.id == track_id)
+    }
+
+    pub fn albums(&self) -> &[AlbumSummary] {
+        &self.albums
+    }
+
+    pub fn artists(&self) -> &[ArtistSummary] {
+        &self.artists
+    }
+
+    pub fn genres(&self) -> &[GenreSummary] {
+        &self.genres
+    }
+
+    pub fn folders(&self) -> &[FolderSummary] {
+        &self.folders
+    }
+
+    pub fn search_tracks(&self, search: &str) -> Vec<TrackSummary> {
+        let search = search.trim();
+        if search.is_empty() {
+            return Vec::new();
+        }
+
+        self.library
+            .query(&TrackQuery::new().search(search))
+            .into_iter()
+            .map(TrackSummary::from)
+            .collect()
+    }
+
+    pub fn search_library(&self, search: &str) -> LibrarySearchResults {
+        let search = search.trim();
+        if search.is_empty() {
+            return LibrarySearchResults::default();
+        }
+
+        let tracks = self.search_tracks(search);
+        let matching_ids: HashSet<_> = tracks.iter().map(|track| track.id).collect();
+        let normalized_search = search.to_lowercase();
+        let has_matching_track = |track_ids: &[TrackId]| {
+            track_ids
+                .iter()
+                .any(|track_id| matching_ids.contains(track_id))
+        };
+
+        LibrarySearchResults {
+            tracks,
+            albums: self
+                .albums
+                .iter()
+                .filter(|album| {
+                    album.title.to_lowercase().contains(&normalized_search)
+                        || album
+                            .album_artist
+                            .to_lowercase()
+                            .contains(&normalized_search)
+                        || has_matching_track(&album.track_ids)
+                })
+                .cloned()
+                .collect(),
+            artists: self
+                .artists
+                .iter()
+                .filter(|artist| {
+                    artist.name.to_lowercase().contains(&normalized_search)
+                        || has_matching_track(&artist.track_ids)
+                })
+                .cloned()
+                .collect(),
+            genres: self
+                .genres
+                .iter()
+                .filter(|genre| {
+                    genre.name.to_lowercase().contains(&normalized_search)
+                        || has_matching_track(&genre.track_ids)
+                })
+                .cloned()
+                .collect(),
+        }
     }
 
     pub fn library_root(&self) -> Option<&Path> {
@@ -188,10 +322,12 @@ impl DesktopApplication {
                     failed: report.failed,
                     issues: report.issues.len(),
                 };
+                let summaries = build_library_summaries(&library);
                 let _ = result_tx.send(ScanResult {
                     root: worker_root,
                     library,
                     summary,
+                    summaries,
                 });
             })
             .map_err(|error| format!("Could not start the library scan: {error}"))?;
@@ -220,7 +356,11 @@ impl DesktopApplication {
 
         self.player = PlayerController::new();
         self.library = received.library;
-        self.tracks = self.library.iter().map(TrackSummary::from).collect();
+        self.tracks = received.summaries.tracks;
+        self.albums = received.summaries.albums;
+        self.artists = received.summaries.artists;
+        self.genres = received.summaries.genres;
+        self.folders = received.summaries.folders;
         self.library_root = Some(received.root);
         self.artwork_result_rx = None;
         self.artwork_loading_track = None;
@@ -369,6 +509,103 @@ impl DesktopApplication {
     }
 }
 
+fn build_library_summaries(library: &MusicLibrary) -> LibrarySummaries {
+    let tracks: Vec<_> = library.iter().map(TrackSummary::from).collect();
+    let albums = library
+        .albums()
+        .into_iter()
+        .map(|album: Album| AlbumSummary {
+            title: album.title().to_owned(),
+            album_artist: album.album_artist().to_owned(),
+            track_ids: album.track_ids().to_vec(),
+        })
+        .collect();
+    let artists = library
+        .artists()
+        .into_iter()
+        .map(|artist: Artist| ArtistSummary {
+            name: artist.name().to_owned(),
+            track_ids: artist.track_ids().to_vec(),
+        })
+        .collect();
+    let genres = summarize_genres(&tracks);
+    let folders = summarize_folders(&tracks);
+
+    LibrarySummaries {
+        tracks,
+        albums,
+        artists,
+        genres,
+        folders,
+    }
+}
+
+fn summarize_genres(tracks: &[TrackSummary]) -> Vec<GenreSummary> {
+    let mut groups: BTreeMap<String, (String, Vec<&TrackSummary>)> = BTreeMap::new();
+
+    for track in tracks {
+        let Some(genre) = track
+            .genre
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let key = genre.to_lowercase();
+        let group = groups
+            .entry(key)
+            .or_insert_with(|| (genre.to_owned(), Vec::new()));
+        if genre < group.0.as_str() {
+            group.0 = genre.to_owned();
+        }
+        group.1.push(track);
+    }
+
+    groups
+        .into_values()
+        .map(|(name, mut tracks)| {
+            tracks
+                .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+            GenreSummary {
+                name,
+                track_ids: tracks.iter().map(|track| track.id).collect(),
+            }
+        })
+        .collect()
+}
+
+fn summarize_folders(tracks: &[TrackSummary]) -> Vec<FolderSummary> {
+    let mut groups: BTreeMap<PathBuf, Vec<&TrackSummary>> = BTreeMap::new();
+
+    for track in tracks {
+        let folder = track
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| track.path.clone());
+        groups.entry(folder).or_default().push(track);
+    }
+
+    groups
+        .into_iter()
+        .map(|(path, mut tracks)| {
+            tracks
+                .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            let display_path = path.display().to_string();
+            FolderSummary {
+                path,
+                name,
+                display_path,
+                track_ids: tracks.iter().map(|track| track.id).collect(),
+            }
+        })
+        .collect()
+}
 impl Default for DesktopApplication {
     fn default() -> Self {
         Self::new()
@@ -390,7 +627,8 @@ mod tests {
         time::Instant,
     };
 
-    use super::{DesktopApplication, TrackSummary};
+    use super::{DesktopApplication, TrackSummary, build_library_summaries};
+    use aurelis_core::audio::AudioMetadata;
     use aurelis_core::library::MusicLibrary;
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -496,5 +734,98 @@ mod tests {
         assert_eq!(summary.year.as_deref(), Some("1998"));
         assert_eq!(summary.track_number, Some(4));
         assert_eq!(summary.disc_number, Some(2));
+    }
+    #[test]
+    fn desktop_search_uses_core_metadata_search() {
+        let mut application = DesktopApplication::new();
+        let matching = application.library.add_track(
+            "Music/Blue Train.flac",
+            AudioMetadata {
+                title: Some("Blue Train".to_owned()),
+                artist: Some("John Coltrane".to_owned()),
+                album: Some("Blue Train Album".to_owned()),
+                genre: Some("Jazz".to_owned()),
+                ..AudioMetadata::default()
+            },
+        );
+        application.library.add_track(
+            "Music/Kind of Blue.flac",
+            AudioMetadata {
+                title: Some("Kind of Blue".to_owned()),
+                artist: Some("Miles Davis".to_owned()),
+                genre: Some("Jazz".to_owned()),
+                ..AudioMetadata::default()
+            },
+        );
+
+        let summaries = build_library_summaries(&application.library);
+        application.tracks = summaries.tracks;
+        application.albums = summaries.albums;
+        application.artists = summaries.artists;
+        application.genres = summaries.genres;
+        application.folders = summaries.folders;
+
+        let results = application.search_library("COLTRANE");
+
+        assert_eq!(results.tracks.len(), 1);
+        assert_eq!(results.tracks[0].id, matching);
+        assert_eq!(results.albums.len(), 1);
+        assert_eq!(results.albums[0].title, "Blue Train Album");
+        assert_eq!(results.artists.len(), 1);
+        assert_eq!(results.artists[0].name, "John Coltrane");
+        assert_eq!(results.genres.len(), 1);
+        assert_eq!(results.genres[0].name, "Jazz");
+    }
+
+    #[test]
+    fn background_library_summaries_group_real_album_artist_genre_and_folder_data() {
+        let mut library = MusicLibrary::new();
+        let second_track = library.add_track(
+            "Music/Album/02.flac",
+            AudioMetadata {
+                title: Some("Second".to_owned()),
+                artist: Some("Singer B".to_owned()),
+                album: Some("Compilation".to_owned()),
+                album_artist: Some("Various Artists".to_owned()),
+                genre: Some("Jazz".to_owned()),
+                track: Some(2),
+                ..AudioMetadata::default()
+            },
+        );
+        let first_track = library.add_track(
+            "Music/Album/01.flac",
+            AudioMetadata {
+                title: Some("First".to_owned()),
+                artist: Some("Singer A".to_owned()),
+                album: Some("Compilation".to_owned()),
+                album_artist: Some("Various Artists".to_owned()),
+                genre: Some(" jazz ".to_owned()),
+                track: Some(1),
+                ..AudioMetadata::default()
+            },
+        );
+        library.add_track(
+            "Music/Other/Track.flac",
+            AudioMetadata {
+                title: Some("Other".to_owned()),
+                artist: Some("Singer C".to_owned()),
+                album: Some("Other Album".to_owned()),
+                genre: Some("Ambient".to_owned()),
+                ..AudioMetadata::default()
+            },
+        );
+
+        let summaries = build_library_summaries(&library);
+        let album = summaries
+            .albums
+            .iter()
+            .find(|album| album.title == "Compilation")
+            .expect("compilation summary");
+
+        assert_eq!(album.album_artist, "Various Artists");
+        assert_eq!(album.track_ids, [first_track, second_track]);
+        assert_eq!(summaries.artists.len(), 3);
+        assert_eq!(summaries.genres.len(), 2);
+        assert_eq!(summaries.folders.len(), 2);
     }
 }

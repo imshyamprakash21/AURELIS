@@ -9,7 +9,8 @@ mod player_controller;
 mod presentation;
 
 pub use application::desktop::{
-    ArtworkImageFormat, ArtworkView, DesktopApplication, DesktopPlaybackState, LibraryScanSummary,
+    AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, DesktopApplication,
+    DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
     PlaybackView, TrackSummary,
 };
 pub use aurelis_core::library::TrackId;
