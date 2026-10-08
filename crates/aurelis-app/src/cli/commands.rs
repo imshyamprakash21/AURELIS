@@ -65,6 +65,7 @@ fn print_usage() {
     println!("  <file>                         Play an audio file");
     println!("  library-play <directory> <track-id> [queued-track-id ...]");
     println!("  library-play <directory> --all");
+    println!("  Library playback shows artwork availability and source.");
     println!();
     println!("LIBRARY");
     println!("  library <directory>            Browse the library");

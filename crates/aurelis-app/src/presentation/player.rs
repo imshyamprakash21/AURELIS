@@ -19,6 +19,24 @@ const QUEUE_ID_WIDTH: usize = 15;
 
 const PROGRESS_BAR_WIDTH: usize = 40;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ArtworkDisplay {
+    Available {
+        format: &'static str,
+        source: String,
+    },
+    Unavailable,
+}
+
+impl ArtworkDisplay {
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::Available { format, source } => format!("Available: {format} ({source})"),
+            Self::Unavailable => "Unavailable (text fallback)".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PlayerLayout {
     width: usize,
@@ -270,7 +288,11 @@ fn playback_state_label(snapshot: &PlaybackSnapshot) -> &'static str {
     }
 }
 
-pub(crate) fn print_now_playing(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+pub(crate) fn print_now_playing(
+    library: &MusicLibrary,
+    snapshot: &PlaybackSnapshot,
+    artwork: &ArtworkDisplay,
+) {
     let layout = current_layout();
     print_section_header("NOW PLAYING", layout);
 
@@ -291,6 +313,7 @@ pub(crate) fn print_now_playing(library: &MusicLibrary, snapshot: &PlaybackSnaps
         }
     }
 
+    print_section_row("Artwork", artwork.summary(), layout);
     print_section_bottom(layout);
 }
 
@@ -434,7 +457,7 @@ pub(crate) fn print_controls(queue_enabled: bool) {
             ("n", "Next track"),
             ("b", "Previous track"),
             ("c", "Clear queue"),
-            ("status", "Technical details"),
+            ("status", "Track and artwork details"),
             ("s", "Stop"),
             ("q", "Quit"),
         ]
@@ -462,13 +485,18 @@ pub(crate) fn print_controls(queue_enabled: bool) {
  * ============================================================
  */
 
-pub(crate) fn print_track_details(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+pub(crate) fn print_track_details(
+    library: &MusicLibrary,
+    snapshot: &PlaybackSnapshot,
+    artwork: &ArtworkDisplay,
+) {
     println!();
     let layout = current_layout();
 
     let Some(track_id) = snapshot.current_track_id() else {
         print_section_header("TRACK DETAILS", layout);
         print_section_row("Track", "Nothing selected", layout);
+        print_section_row("Artwork", artwork.summary(), layout);
         print_section_bottom(layout);
         return;
     };
@@ -476,6 +504,7 @@ pub(crate) fn print_track_details(library: &MusicLibrary, snapshot: &PlaybackSna
     let Some(track) = library.get(track_id) else {
         print_section_header("TRACK DETAILS", layout);
         print_section_row("Track", format!("{track_id:?} unavailable"), layout);
+        print_section_row("Artwork", artwork.summary(), layout);
         print_section_bottom(layout);
         return;
     };
@@ -539,6 +568,7 @@ pub(crate) fn print_track_details(library: &MusicLibrary, snapshot: &PlaybackSna
     );
     print_section_row("Duration", metadata.duration_string(), layout);
     print_section_row("Path", track.path().display(), layout);
+    print_section_row("Artwork", artwork.summary(), layout);
     print_section_bottom(layout);
 }
 
@@ -547,12 +577,16 @@ pub(crate) fn print_track_details(library: &MusicLibrary, snapshot: &PlaybackSna
  * ============================================================
  */
 
-pub(crate) fn print_player_screen(library: &MusicLibrary, snapshot: &PlaybackSnapshot) {
+pub(crate) fn print_player_screen(
+    library: &MusicLibrary,
+    snapshot: &PlaybackSnapshot,
+    artwork: &ArtworkDisplay,
+) {
     print_player_header(current_layout());
 
     println!();
 
-    print_now_playing(library, snapshot);
+    print_now_playing(library, snapshot, artwork);
 
     println!();
 

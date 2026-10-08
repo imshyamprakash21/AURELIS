@@ -38,13 +38,13 @@ cargo run -p aurelis-app -- --info "C:\Music\song.flac"
 
 Run `aurelis-app --help` for the complete command list. Library scanning currently recognizes FLAC, MP3, AAC, M4A, OGG, and WAV file extensions. Direct playback uses the file decoders provided by Symphonia.
 
-During playback, left/right arrows seek by five seconds; `p` pauses, `r` resumes, `s` stops, and `q` quits. Library playback also supports `n`/`b` for next/previous track and `c` to clear the remaining queue. The `status` command shows technical details during library playback.
+During playback, left/right arrows seek by five seconds; `p` pauses, `r` resumes, `s` stops, and `q` quits. Library playback also supports `n`/`b` for next/previous track and `c` to clear the remaining queue. The `status` command shows technical details and artwork availability/source during library playback.
 
 ## Library data
 
 The library index is stored under `.aurelis_cache/library-index.json` inside each scanned music folder. It is rebuilt when missing or invalid and is ignored by Git. AURELIS does not require network access or a database for local playback and scanning.
 
-The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. Artwork is loaded lazily from embedded JPEG/PNG data first, then explicit albumart files, then common folder names such as cover, folder, front, album, and artwork; the cache retains hits and misses until cleared. These foundations are not yet exposed as CLI workflows.
+The core library also provides APIs for ordered playlists, local LRC/plain-text lyrics, artwork discovery and caching, and artwork-derived visual colors. Artwork is loaded lazily from embedded JPEG/PNG data first, then explicit albumart files, then common folder names such as cover, folder, front, album, and artwork; the cache retains hits and misses until cleared. During library playback, the now-playing screen and status report artwork availability, format, and source filename (or embedded source). Missing artwork uses a text fallback. The terminal reports artwork metadata without drawing image pixels.
 
 ## Known limitation
 

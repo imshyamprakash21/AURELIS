@@ -7,19 +7,48 @@ use std::{
 
 use aurelis_core::{
     audio::{PlaybackEndReason, PlaybackEngine},
-    library::MusicLibrary,
+    library::{ArtworkCache, ArtworkFormat, ArtworkSource, MusicLibrary, TrackId},
 };
 
 use crate::{
     input::start_control_reader,
     player_controller::PlaybackControlTarget,
     presentation::player::{
-        display_width, finish_position_line, format_progress_line, format_time,
+        ArtworkDisplay, display_width, finish_position_line, format_progress_line, format_time,
         player_terminal_width, print_controls, print_event, print_field, print_now_playing,
         print_player_screen, print_progress, print_queue, print_queue_position,
         print_track_details,
     },
 };
+
+fn artwork_display_for_track(
+    library: &MusicLibrary,
+    track_id: Option<TrackId>,
+    cache: &mut ArtworkCache,
+) -> ArtworkDisplay {
+    let Some(track) = track_id.and_then(|track_id| library.get(track_id)) else {
+        return ArtworkDisplay::Unavailable;
+    };
+    let Some(artwork) = cache.get_for_track(track) else {
+        return ArtworkDisplay::Unavailable;
+    };
+
+    let format = match artwork.format() {
+        ArtworkFormat::Jpeg => "JPEG",
+        ArtworkFormat::Png => "PNG",
+    };
+    let source = match artwork.source() {
+        ArtworkSource::Embedded => "embedded".to_string(),
+        ArtworkSource::FileSystem { path } => format!(
+            "file: {}",
+            path.file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
+        ),
+    };
+
+    ArtworkDisplay::Available { format, source }
+}
 
 pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
     engine: &mut T,
@@ -36,13 +65,16 @@ pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
     let mut position_line_width = 0;
 
     let mut position_line_cleared_near_end = false;
+    let mut artwork_cache = ArtworkCache::new();
 
     /*
      * Initial screen.
      */
     if let Some(library) = library {
         if let Some(snapshot) = engine.playback_snapshot(Some(library)) {
-            print_player_screen(library, &snapshot);
+            let artwork =
+                artwork_display_for_track(library, snapshot.current_track_id(), &mut artwork_cache);
+            print_player_screen(library, &snapshot, &artwork);
         }
     } else {
         println!();
@@ -256,7 +288,12 @@ pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
 
                             if let Some(library) = library {
                                 if let Some(snapshot) = engine.playback_snapshot(Some(library)) {
-                                    print_track_details(library, &snapshot);
+                                    let artwork = artwork_display_for_track(
+                                        library,
+                                        snapshot.current_track_id(),
+                                        &mut artwork_cache,
+                                    );
+                                    print_track_details(library, &snapshot, &artwork);
                                 } else {
                                     print_event("Track details are unavailable.");
                                 }
@@ -400,7 +437,12 @@ pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
 
                     println!();
 
-                    print_now_playing(library, &snapshot);
+                    let artwork = artwork_display_for_track(
+                        library,
+                        snapshot.current_track_id(),
+                        &mut artwork_cache,
+                    );
+                    print_now_playing(library, &snapshot, &artwork);
 
                     println!();
 
@@ -451,6 +493,161 @@ pub(crate) fn run_playback_controls<T: PlaybackControlTarget>(
         }
 
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod artwork_presentation_tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use aurelis_core::{
+        audio::AudioMetadata,
+        library::{ArtworkCache, MusicLibrary, TrackId},
+    };
+
+    use super::artwork_display_for_track;
+    use crate::presentation::player::ArtworkDisplay;
+
+    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "aurelis-app-artwork-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create artwork test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_track(directory: &Path) -> (MusicLibrary, TrackId) {
+        let path = directory.join("song.flac");
+        fs::write(&path, b"not an audio file").expect("write test track");
+        let mut library = MusicLibrary::new();
+        let id = library.add_track(path, AudioMetadata::default());
+        (library, id)
+    }
+
+    fn jpeg_bytes() -> Vec<u8> {
+        vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11,
+            0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x00, 0xff, 0xd9,
+        ]
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = u32::MAX;
+            for byte in data {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ if crc & 1 == 1 { 0xedb8_8320 } else { 0 };
+                }
+            }
+            !crc
+        }
+
+        fn append_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let crc_start = output.len();
+            output.extend_from_slice(kind);
+            output.extend_from_slice(data);
+            output.extend_from_slice(&crc32(&output[crc_start..]).to_be_bytes());
+        }
+
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        append_chunk(
+            &mut bytes,
+            b"IHDR",
+            &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0],
+        );
+        append_chunk(
+            &mut bytes,
+            b"IDAT",
+            &[0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01],
+        );
+        append_chunk(&mut bytes, b"IEND", &[]);
+        bytes
+    }
+
+    fn expected(format: &'static str, source: &str) -> ArtworkDisplay {
+        ArtworkDisplay::Available {
+            format,
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn exposes_current_jpeg_artwork_source_and_format() {
+        let directory = TemporaryDirectory::new();
+        let (library, track_id) = test_track(directory.path());
+        fs::write(directory.path().join("cover.jpeg"), jpeg_bytes()).expect("write JPEG cover");
+        let mut cache = ArtworkCache::new();
+
+        let display = artwork_display_for_track(&library, Some(track_id), &mut cache);
+
+        assert_eq!(display, expected("JPEG", "file: cover.jpeg"));
+        assert_eq!(display.summary(), "Available: JPEG (file: cover.jpeg)");
+    }
+
+    #[test]
+    fn exposes_current_png_artwork_source_and_format() {
+        let directory = TemporaryDirectory::new();
+        let (library, track_id) = test_track(directory.path());
+        fs::write(directory.path().join("cover.png"), png_bytes()).expect("write PNG cover");
+        let mut cache = ArtworkCache::new();
+
+        let display = artwork_display_for_track(&library, Some(track_id), &mut cache);
+
+        assert_eq!(display, expected("PNG", "file: cover.png"));
+    }
+
+    #[test]
+    fn missing_artwork_has_a_stable_text_fallback() {
+        let directory = TemporaryDirectory::new();
+        let (library, track_id) = test_track(directory.path());
+        let mut cache = ArtworkCache::new();
+
+        let display = artwork_display_for_track(&library, Some(track_id), &mut cache);
+
+        assert_eq!(display, ArtworkDisplay::Unavailable);
+        assert_eq!(display.summary(), "Unavailable (text fallback)");
+    }
+
+    #[test]
+    fn artwork_lookup_waits_until_a_track_is_selected() {
+        let directory = TemporaryDirectory::new();
+        let (library, track_id) = test_track(directory.path());
+        let mut cache = ArtworkCache::new();
+
+        assert_eq!(
+            artwork_display_for_track(&library, None, &mut cache),
+            ArtworkDisplay::Unavailable
+        );
+        fs::write(directory.path().join("cover.jpeg"), jpeg_bytes()).expect("write JPEG cover");
+
+        assert_eq!(
+            artwork_display_for_track(&library, Some(track_id), &mut cache),
+            expected("JPEG", "file: cover.jpeg")
+        );
     }
 }
 
