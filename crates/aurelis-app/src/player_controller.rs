@@ -236,17 +236,35 @@ impl PlaybackQueue {
     }
 }
 
+/// The application-owned playback state, kept separately from the audio
+/// worker handle and derived from the library's stable TrackIds.
+#[derive(Debug)]
+struct PlaybackSession {
+    current_track_id: Option<TrackId>,
+    queue: PlaybackQueue,
+    state: PlaybackStatus,
+    last_position: Duration,
+}
+
+impl Default for PlaybackSession {
+    fn default() -> Self {
+        Self {
+            current_track_id: None,
+            queue: PlaybackQueue::default(),
+            state: PlaybackStatus::Stopped,
+            last_position: Duration::ZERO,
+        }
+    }
+}
+
 /// Owns the app-level current-track and queue lifecycle.
 ///
 /// The library retains Track data. The controller stores TrackIds and opens
 /// each playback session from the selected Track's path.
 pub(crate) struct PlayerController {
     factory: Box<dyn PlaybackFactory>,
-    session: Option<Box<dyn PlaybackControlTarget>>,
-    current_track_id: Option<TrackId>,
-    queue: PlaybackQueue,
-    state: PlaybackStatus,
-    last_position: Duration,
+    engine: Option<Box<dyn PlaybackControlTarget>>,
+    session: PlaybackSession,
 }
 
 impl PlayerController {
@@ -257,36 +275,33 @@ impl PlayerController {
     fn with_factory(factory: Box<dyn PlaybackFactory>) -> Self {
         Self {
             factory,
-            session: None,
-            current_track_id: None,
-            queue: PlaybackQueue::default(),
-            state: PlaybackStatus::Stopped,
-            last_position: Duration::ZERO,
+            engine: None,
+            session: PlaybackSession::default(),
         }
     }
 
     pub(crate) fn current_track_id(&self) -> Option<TrackId> {
-        self.current_track_id
+        self.session.current_track_id
     }
 
     /// Resolve the current ID through the library without copying its metadata.
     pub(crate) fn current_track<'a>(&self, library: &'a MusicLibrary) -> Option<&'a Track> {
-        self.current_track_id.and_then(|id| library.get(id))
+        self.session.current_track_id.and_then(|id| library.get(id))
     }
 
     pub(crate) fn queue(&self) -> &[TrackId] {
-        &self.queue.entries
+        &self.session.queue.entries
     }
 
     pub(crate) fn playback_state(&self) -> PlaybackStatus {
-        self.state
+        self.session.state
     }
 
     /// Copy the current app state for a UI or CLI renderer.
     pub(crate) fn snapshot(&self, library: &MusicLibrary) -> PlaybackSnapshot {
         let track = self.current_track(library);
         let duration = self
-            .session
+            .engine
             .as_ref()
             .and_then(|session| session.total_duration())
             .or_else(|| track.and_then(|track| track.metadata().duration));
@@ -304,7 +319,7 @@ impl PlayerController {
     pub(crate) fn queue_snapshot(&self) -> QueueSnapshot {
         QueueSnapshot {
             track_ids: self.queue().to_vec(),
-            current_index: self.queue.current_index,
+            current_index: self.session.queue.current_index,
         }
     }
 
@@ -319,10 +334,10 @@ impl PlayerController {
         let track = library
             .get(track_id)
             .ok_or(PlayerControllerError::TrackNotFound(track_id))?;
-        let existing_index = self.queue.index_of(track_id);
+        let existing_index = self.session.queue.index_of(track_id);
 
         self.start_session(track.path(), track_id)?;
-        self.queue.select(track_id, existing_index);
+        self.session.queue.select(track_id, existing_index);
         Ok(())
     }
 
@@ -349,22 +364,23 @@ impl PlayerController {
             return Err(PlayerControllerError::TrackNotFound(track_id));
         }
 
-        if self.queue.entries.is_empty() {
+        if self.session.queue.entries.is_empty() {
             if let Some(current) = self
+                .session
                 .current_track_id
                 .filter(|id| library.get(*id).is_some())
             {
-                self.queue.entries.push(current);
-                self.queue.current_index = Some(0);
+                self.session.queue.entries.push(current);
+                self.session.queue.current_index = Some(0);
             }
         }
 
-        self.queue.entries.extend(track_ids);
+        self.session.queue.entries.extend(track_ids);
         Ok(())
     }
 
     pub(crate) fn clear_queue(&mut self) {
-        self.queue.clear();
+        self.session.queue.clear();
     }
 
     /// Start the next queued track, returning `None` at the end of the queue.
@@ -372,7 +388,7 @@ impl PlayerController {
         &mut self,
         library: &MusicLibrary,
     ) -> Result<Option<TrackId>, PlayerControllerError> {
-        let Some(index) = self.queue.next_index() else {
+        let Some(index) = self.session.queue.next_index() else {
             return Ok(None);
         };
         self.start_queued_track(library, index)
@@ -383,7 +399,7 @@ impl PlayerController {
         &mut self,
         library: &MusicLibrary,
     ) -> Result<Option<TrackId>, PlayerControllerError> {
-        let Some(index) = self.queue.previous_index() else {
+        let Some(index) = self.session.queue.previous_index() else {
             return Ok(None);
         };
         self.start_queued_track(library, index)
@@ -396,35 +412,35 @@ impl PlayerController {
         library: &MusicLibrary,
     ) -> Option<Result<PlaybackEndReason, Box<dyn Error>>> {
         let (result, position) = {
-            let session = self.session.as_mut()?;
+            let session = self.engine.as_mut()?;
             (session.poll(None), session.position())
         };
         match result {
             None => None,
             Some(Err(error)) => {
-                self.last_position = position;
-                self.session = None;
-                self.state = PlaybackStatus::Stopped;
+                self.session.last_position = position;
+                self.engine = None;
+                self.session.state = PlaybackStatus::Stopped;
                 Some(Err(error))
             }
             Some(Ok(PlaybackEndReason::Stopped)) => {
-                self.last_position = position;
-                self.session = None;
-                self.state = PlaybackStatus::Stopped;
+                self.session.last_position = position;
+                self.engine = None;
+                self.session.state = PlaybackStatus::Stopped;
                 Some(Ok(PlaybackEndReason::Stopped))
             }
             Some(Ok(PlaybackEndReason::Completed)) => {
-                self.last_position = position;
-                self.session = None;
-                self.state = PlaybackStatus::Finished;
+                self.session.last_position = position;
+                self.engine = None;
+                self.session.state = PlaybackStatus::Finished;
 
-                let Some(index) = self.queue.next_index() else {
+                let Some(index) = self.session.queue.next_index() else {
                     return Some(Ok(PlaybackEndReason::Completed));
                 };
                 match self.start_queued_track(library, index) {
                     Ok(_) => None,
                     Err(error) => {
-                        self.state = PlaybackStatus::Finished;
+                        self.session.state = PlaybackStatus::Finished;
                         Some(Err(Box::new(error)))
                     }
                 }
@@ -436,7 +452,7 @@ impl PlayerController {
     /// interpreting the stop as natural completion.
     pub(crate) fn shutdown(&mut self) -> Result<(), PlayerControllerError> {
         self.stop_current_session()?;
-        self.state = PlaybackStatus::Stopped;
+        self.session.state = PlaybackStatus::Stopped;
         Ok(())
     }
 
@@ -445,7 +461,7 @@ impl PlayerController {
         library: &MusicLibrary,
         index: usize,
     ) -> Result<Option<TrackId>, PlayerControllerError> {
-        let Some(&track_id) = self.queue.entries.get(index) else {
+        let Some(&track_id) = self.session.queue.entries.get(index) else {
             return Ok(None);
         };
 
@@ -453,7 +469,7 @@ impl PlayerController {
             .get(track_id)
             .ok_or(PlayerControllerError::TrackNotFound(track_id))?;
         self.start_session(track.path(), track_id)?;
-        self.queue.current_index = Some(index);
+        self.session.queue.current_index = Some(index);
         Ok(Some(track_id))
     }
 
@@ -469,21 +485,21 @@ impl PlayerController {
             .open(path)
             .map_err(PlayerControllerError::Playback)?;
         if let Err(error) = session.play() {
-            self.state = PlaybackStatus::Stopped;
+            self.session.state = PlaybackStatus::Stopped;
             return Err(PlayerControllerError::Playback(error));
         }
 
-        self.session = Some(session);
-        self.current_track_id = Some(track_id);
-        self.state = PlaybackStatus::Playing;
-        self.last_position = Duration::ZERO;
+        self.engine = Some(session);
+        self.session.current_track_id = Some(track_id);
+        self.session.state = PlaybackStatus::Playing;
+        self.session.last_position = Duration::ZERO;
         Ok(())
     }
 
     fn stop_current_session(&mut self) -> Result<(), PlayerControllerError> {
-        self.state = PlaybackStatus::Stopped;
-        if let Some(mut session) = self.session.take() {
-            self.last_position = session.position();
+        self.session.state = PlaybackStatus::Stopped;
+        if let Some(mut session) = self.engine.take() {
+            self.session.last_position = session.position();
             session.stop();
             session.wait().map_err(PlayerControllerError::Playback)?;
         }
@@ -493,59 +509,59 @@ impl PlayerController {
 
 impl PlaybackControlTarget for PlayerController {
     fn play(&mut self) -> AppResult<()> {
-        let Some(session) = self.session.as_mut() else {
+        let Some(session) = self.engine.as_mut() else {
             return Err("No track is selected for playback".into());
         };
         session.play()?;
-        self.state = PlaybackStatus::Playing;
+        self.session.state = PlaybackStatus::Playing;
         Ok(())
     }
 
     fn pause(&mut self) {
-        if self.state == PlaybackStatus::Playing {
-            if let Some(session) = self.session.as_mut() {
+        if self.session.state == PlaybackStatus::Playing {
+            if let Some(session) = self.engine.as_mut() {
                 session.pause();
-                self.state = PlaybackStatus::Paused;
+                self.session.state = PlaybackStatus::Paused;
             }
         }
     }
 
     fn resume(&mut self) {
-        if self.state == PlaybackStatus::Paused {
-            if let Some(session) = self.session.as_mut() {
+        if self.session.state == PlaybackStatus::Paused {
+            if let Some(session) = self.engine.as_mut() {
                 session.resume();
-                self.state = PlaybackStatus::Playing;
+                self.session.state = PlaybackStatus::Playing;
             }
         }
     }
 
     fn stop(&mut self) {
-        if let Some(session) = self.session.as_mut() {
-            self.last_position = session.position();
+        if let Some(session) = self.engine.as_mut() {
+            self.session.last_position = session.position();
             session.stop();
         }
-        self.state = PlaybackStatus::Stopped;
+        self.session.state = PlaybackStatus::Stopped;
     }
 
     fn seek_by_seconds(&mut self, offset_seconds: i64) -> AppResult<()> {
-        let Some(session) = self.session.as_mut() else {
+        let Some(session) = self.engine.as_mut() else {
             return Err("Cannot seek unless playback is active".into());
         };
         session.seek_by_seconds(offset_seconds)
     }
 
     fn position(&self) -> Duration {
-        match self.state {
+        match self.session.state {
             PlaybackStatus::Playing | PlaybackStatus::Paused => self
-                .session
+                .engine
                 .as_ref()
-                .map_or(self.last_position, |session| session.position()),
-            PlaybackStatus::Stopped | PlaybackStatus::Finished => self.last_position,
+                .map_or(self.session.last_position, |session| session.position()),
+            PlaybackStatus::Stopped | PlaybackStatus::Finished => self.session.last_position,
         }
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        self.session
+        self.engine
             .as_ref()
             .and_then(|session| session.total_duration())
     }
@@ -561,20 +577,20 @@ impl PlaybackControlTarget for PlayerController {
     }
 
     fn wait(&mut self) -> Result<PlaybackEndReason, Box<dyn Error>> {
-        let Some(session) = self.session.as_mut() else {
-            return Ok(match self.state {
+        let Some(session) = self.engine.as_mut() else {
+            return Ok(match self.session.state {
                 PlaybackStatus::Finished => PlaybackEndReason::Completed,
                 PlaybackStatus::Stopped => PlaybackEndReason::Stopped,
                 PlaybackStatus::Playing | PlaybackStatus::Paused => {
-                    self.state = PlaybackStatus::Stopped;
+                    self.session.state = PlaybackStatus::Stopped;
                     PlaybackEndReason::Stopped
                 }
             });
         };
         let result = session.wait();
-        self.last_position = session.position();
-        self.session = None;
-        self.state = match &result {
+        self.session.last_position = session.position();
+        self.engine = None;
+        self.session.state = match &result {
             Ok(PlaybackEndReason::Completed) => PlaybackStatus::Finished,
             Ok(PlaybackEndReason::Stopped) | Err(_) => PlaybackStatus::Stopped,
         };
@@ -582,7 +598,7 @@ impl PlaybackControlTarget for PlayerController {
     }
 
     fn current_track_id(&self) -> Option<TrackId> {
-        self.current_track_id
+        self.session.current_track_id
     }
 
     fn playback_snapshot(&self, library: Option<&MusicLibrary>) -> Option<PlaybackSnapshot> {
@@ -651,6 +667,7 @@ mod tests {
         position: Duration,
         stop_calls: usize,
         wait_calls: usize,
+        seek_offsets: Vec<i64>,
     }
 
     #[derive(Clone, Default)]
@@ -682,6 +699,7 @@ mod tests {
                 position: Duration::ZERO,
                 stop_calls: 0,
                 wait_calls: 0,
+                seek_offsets: Vec::new(),
             }));
             self.sessions.lock().unwrap().push(Arc::clone(&state));
             Ok(Box::new(FakeSession { state }))
@@ -719,10 +737,12 @@ mod tests {
             state.end_reason = Some(PlaybackEndReason::Stopped);
         }
 
-        fn seek_by_seconds(&mut self, _offset_seconds: i64) -> AppResult<()> {
-            if self.state.lock().unwrap().state == PlaybackStatus::Stopped {
+        fn seek_by_seconds(&mut self, offset_seconds: i64) -> AppResult<()> {
+            let mut state = self.state.lock().unwrap();
+            if state.state == PlaybackStatus::Stopped {
                 return Err("playback is stopped".into());
             }
+            state.seek_offsets.push(offset_seconds);
             Ok(())
         }
 
@@ -903,6 +923,23 @@ mod tests {
     }
 
     #[test]
+    fn seek_delegates_to_the_active_session_and_rejects_an_empty_session() {
+        let (library, first, _, _) = test_library();
+        let factory = FakeFactory::default();
+        let mut player = controller(&factory);
+
+        assert!(player.seek_by_seconds(10).is_err());
+        player.play_track(&library, first).unwrap();
+        player.seek_by_seconds(15).unwrap();
+        player.pause();
+        player.seek_by_seconds(-5).unwrap();
+
+        let sessions = factory.sessions();
+        assert_eq!(sessions[0].lock().unwrap().seek_offsets, [15, -5]);
+        assert_eq!(player.playback_state(), PlaybackStatus::Paused);
+    }
+
+    #[test]
     fn playing_a_valid_id_tracks_it_and_opens_its_path() {
         let (library, first, _, _) = test_library();
         let factory = FakeFactory::default();
@@ -991,6 +1028,24 @@ mod tests {
 
         assert_eq!(controller.queue(), &[first, second, third]);
         assert_eq!(controller.next(&library).unwrap(), Some(second));
+    }
+
+    #[test]
+    fn selecting_a_new_track_replaces_only_the_unplayed_queue_tail() {
+        let (mut library, first, second, third) = test_library();
+        let fourth = library.add_track("music/d.flac", AudioMetadata::default());
+        let factory = FakeFactory::default();
+        let mut controller = controller(&factory);
+
+        controller.play_track(&library, first).unwrap();
+        controller
+            .enqueue_tracks(&library, [second, third])
+            .unwrap();
+        controller.play_track(&library, fourth).unwrap();
+
+        assert_eq!(controller.queue(), &[first, fourth]);
+        assert_eq!(controller.queue_snapshot().current_index(), Some(1));
+        assert_eq!(controller.current_track_id(), Some(fourth));
     }
 
     #[test]
