@@ -704,6 +704,27 @@ impl AurelisDesktop {
                 );
                 ui.add_space(spacing::GAP_25);
 
+                let has_track_tags = track.year.is_some()
+                    || track.genre.is_some()
+                    || track.track_number.is_some()
+                    || track.disc_number.is_some();
+                if has_track_tags {
+                    ui.add_space(spacing::GAP_22);
+                    section_heading(ui, "TRACK INFO");
+                    ui.add_space(spacing::GAP_8);
+                    if let Some(year) = &track.year {
+                        metadata_row(ui, "Release year", year.clone());
+                    }
+                    if let Some(genre) = &track.genre {
+                        metadata_row(ui, "Genre", genre.clone());
+                    }
+                    if let Some(track_number) = track.track_number {
+                        metadata_row(ui, "Track", track_number.to_string());
+                    }
+                    if let Some(disc_number) = track.disc_number {
+                        metadata_row(ui, "Disc", disc_number.to_string());
+                    }
+                }
                 section_heading(ui, "PLAYBACK");
                 ui.add_space(spacing::GAP_6);
                 ui.label(
@@ -848,7 +869,11 @@ impl eframe::App for AurelisDesktop {
             )
             .show(ui, |ui| match self.page {
                 Page::Library => self.draw_library(ui),
-                Page::NowPlaying => self.draw_now_playing(ui),
+                Page::NowPlaying => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.draw_now_playing(ui));
+                }
             });
 
         context.request_repaint_after(Duration::from_millis(motion::FRAME_REFRESH_MS));

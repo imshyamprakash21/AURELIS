@@ -62,6 +62,10 @@ pub struct TrackSummary {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub year: Option<String>,
+    pub genre: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
     pub path: PathBuf,
     pub duration: Option<Duration>,
     pub codec: String,
@@ -79,6 +83,10 @@ impl From<&Track> for TrackSummary {
             title: track.display_title().into_owned(),
             artist: track.display_artist().into_owned(),
             album: track.display_album().into_owned(),
+            year: metadata.year.clone(),
+            genre: metadata.genre.clone(),
+            track_number: metadata.track,
+            disc_number: metadata.disc,
             path: track.path().to_path_buf(),
             duration: metadata.duration,
             codec: metadata.codec.clone(),
@@ -382,7 +390,8 @@ mod tests {
         time::Instant,
     };
 
-    use super::DesktopApplication;
+    use super::{DesktopApplication, TrackSummary};
+    use aurelis_core::library::MusicLibrary;
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -465,5 +474,27 @@ mod tests {
         assert_eq!(application.tracks()[0].codec, "PCM");
         assert_eq!(application.library_root(), Some(directory.path()));
         assert!(!application.is_scanning());
+    }
+
+    #[test]
+    fn track_summary_preserves_real_descriptive_tags() {
+        let mut library = MusicLibrary::new();
+        let id = library.add_track(
+            "music/tagged.flac",
+            aurelis_core::audio::AudioMetadata {
+                genre: Some("Trip hop".to_owned()),
+                year: Some("1998".to_owned()),
+                track: Some(4),
+                disc: Some(2),
+                ..Default::default()
+            },
+        );
+        let track = library.get(id).expect("inserted track");
+        let summary = TrackSummary::from(track);
+
+        assert_eq!(summary.genre.as_deref(), Some("Trip hop"));
+        assert_eq!(summary.year.as_deref(), Some("1998"));
+        assert_eq!(summary.track_number, Some(4));
+        assert_eq!(summary.disc_number, Some(2));
     }
 }
