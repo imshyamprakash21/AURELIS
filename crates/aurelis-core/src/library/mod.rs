@@ -1,4 +1,5 @@
 mod artwork;
+mod artwork_visual;
 mod grouping;
 mod lyrics;
 mod persistence;
@@ -8,6 +9,9 @@ mod scanner;
 mod track;
 
 pub use artwork::{Artwork, ArtworkCache, ArtworkFormat, load_artwork_for_track};
+pub use artwork_visual::{
+    ArtworkVisual, ArtworkVisualError, BackgroundGradient, RgbColor, TextContrast,
+};
 pub use grouping::{Album, Artist};
 pub use lyrics::{Lyrics, LyricsError, SyncedLyricLine, load_lyrics_for_track};
 pub use playlist::{Playlist, PlaylistCollection, PlaylistError, PlaylistId, PlaylistTrack};
