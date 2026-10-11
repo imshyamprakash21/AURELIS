@@ -12,17 +12,19 @@ use crate::components::{
     track_row,
 };
 use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
+use crate::universe::{self, UniverseAction};
 use aurelis_app::{
     AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, ArtworkVisual,
     DesktopApplication, DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary,
-    LibrarySearchResults, Lyrics, PlaybackView, SPECTRUM_BAND_COUNT, SpectrumSnapshot, TrackId,
-    TrackSummary,
+    LibrarySearchResults, Lyrics, PlaybackView, PlaylistId, PlaylistTrackSummary,
+    SPECTRUM_BAND_COUNT, SpectrumSnapshot, TrackId, TrackSummary,
 };
 use eframe::egui::{self, Align, Color32, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
     Library,
+    Universe,
     NowPlaying,
 }
 
@@ -34,16 +36,18 @@ enum LibrarySection {
     Artists,
     Genres,
     Folders,
+    Playlists,
 }
 
 impl LibrarySection {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Home,
         Self::Tracks,
         Self::Albums,
         Self::Artists,
         Self::Genres,
         Self::Folders,
+        Self::Playlists,
     ];
 
     fn label(self) -> &'static str {
@@ -54,6 +58,7 @@ impl LibrarySection {
             Self::Artists => "Artists",
             Self::Genres => "Genres",
             Self::Folders => "Folders",
+            Self::Playlists => "Playlists",
         }
     }
 }
@@ -139,6 +144,24 @@ enum QueueAction {
     Play(TrackId),
 }
 
+enum PlaylistListAction {
+    Open(PlaylistId),
+    BeginRename(PlaylistId, String),
+    SaveRename(PlaylistId, String),
+    CancelRename,
+    AskDelete(PlaylistId),
+    CancelDelete,
+    ConfirmDelete(PlaylistId),
+}
+
+enum PlaylistTrackAction {
+    Play(TrackId),
+    Queue(TrackId),
+    MoveUp(usize),
+    MoveDown(usize),
+    Remove(usize),
+}
+
 struct SelectedCollection {
     title: String,
     subtitle: String,
@@ -207,6 +230,14 @@ pub(crate) struct AurelisDesktop {
     search_results: LibrarySearchResults,
     search_results_stale: bool,
     selected_collection: Option<SelectedCollection>,
+    selected_playlist: Option<PlaylistId>,
+    new_playlist_name: String,
+    editing_playlist: Option<PlaylistId>,
+    renamed_playlist_name: String,
+    pending_delete_playlist: Option<PlaylistId>,
+    playlist_add_target: Option<PlaylistId>,
+    playlist_add_search: String,
+    universe_selected_track: Option<TrackId>,
     message: Option<BannerMessage>,
     artwork_track: Option<TrackId>,
     artwork_request_for: Option<TrackId>,
@@ -237,6 +268,14 @@ impl AurelisDesktop {
             search_results: LibrarySearchResults::default(),
             search_results_stale: true,
             selected_collection: None,
+            selected_playlist: None,
+            new_playlist_name: String::new(),
+            editing_playlist: None,
+            renamed_playlist_name: String::new(),
+            pending_delete_playlist: None,
+            playlist_add_target: None,
+            playlist_add_search: String::new(),
+            universe_selected_track: None,
             message: Some(BannerMessage {
                 text: "Choose a local music folder to build your library.".to_owned(),
                 tone: MessageTone::Info,
@@ -336,18 +375,29 @@ impl AurelisDesktop {
     fn accept_scan(&mut self, summary: LibraryScanSummary) {
         self.search_results_stale = true;
         self.selected_collection = None;
+        self.selected_playlist = None;
+        self.editing_playlist = None;
+        self.pending_delete_playlist = None;
+        self.playlist_add_target = None;
+        self.playlist_add_search.clear();
+        self.universe_selected_track = None;
         self.artwork_visual_cache.clear();
-        let message = format!(
+        let mut message = format!(
             "{} supported files found · {} added · {} refreshed · {} unreadable · {} scan issues",
             summary.discovered, summary.added, summary.updated, summary.failed, summary.issues,
         );
-        let tone = if summary.issues > 0 && summary.added + summary.updated == 0 {
+        let mut tone = if summary.issues > 0 && summary.added + summary.updated == 0 {
             MessageTone::Error
         } else if summary.issues > 0 || summary.discovered == 0 {
             MessageTone::Info
         } else {
             MessageTone::Success
         };
+        if let Some(error) = self.application.playlist_storage_error() {
+            message.push_str(" · ");
+            message.push_str(error);
+            tone = MessageTone::Error;
+        }
         self.show_message(message, tone);
     }
 
@@ -624,6 +674,10 @@ impl AurelisDesktop {
         ui.add_space(spacing::GAP_6);
         if navigation_button(ui, "02", "Now Playing", self.page == Page::NowPlaying) {
             self.page = Page::NowPlaying;
+        }
+        ui.add_space(spacing::GAP_6);
+        if navigation_button(ui, "03", "Universe", self.page == Page::Universe) {
+            self.page = Page::Universe;
         }
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
@@ -973,6 +1027,9 @@ impl AurelisDesktop {
                 {
                     self.library_section = section;
                     self.selected_collection = None;
+                    if section != LibrarySection::Playlists {
+                        self.selected_playlist = None;
+                    }
                 }
             }
         });
@@ -1017,6 +1074,417 @@ impl AurelisDesktop {
             LibrarySection::Artists => self.draw_artist_groups(ui),
             LibrarySection::Genres => self.draw_genre_groups(ui),
             LibrarySection::Folders => self.draw_folder_groups(ui),
+            LibrarySection::Playlists => self.draw_playlists(ui),
+        }
+    }
+
+    fn draw_playlists(&mut self, ui: &mut egui::Ui) {
+        if self.application.library_root().is_none() {
+            empty_state(
+                ui,
+                "Scan a music folder first",
+                "Playlists are saved locally alongside the selected library.",
+            );
+            return;
+        }
+
+        if let Some(error) = self.application.playlist_storage_error() {
+            draw_message(
+                ui,
+                &BannerMessage {
+                    text: error.to_owned(),
+                    tone: MessageTone::Error,
+                },
+            );
+            empty_state(
+                ui,
+                "Saved playlists need attention",
+                "The saved playlist file could not be loaded. AURELIS will not overwrite it.",
+            );
+            return;
+        }
+
+        if let Some(playlist_id) = self.selected_playlist {
+            self.draw_playlist_detail(ui, playlist_id);
+            return;
+        }
+
+        section_heading(ui, "PLAYLISTS");
+        ui.add_space(spacing::GAP_8);
+        let mut create_requested = false;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_playlist_name)
+                    .desired_width(ui.available_width() - 130.0)
+                    .hint_text("Name a playlist"),
+            );
+            create_requested = ui
+                .add_enabled(
+                    self.application.can_edit_playlists(),
+                    egui::Button::new("Create playlist"),
+                )
+                .clicked();
+        });
+        if create_requested {
+            match self
+                .application
+                .create_playlist(self.new_playlist_name.trim())
+            {
+                Ok(playlist_id) => {
+                    self.new_playlist_name.clear();
+                    self.selected_playlist = Some(playlist_id);
+                    self.show_message("Playlist created.", MessageTone::Success);
+                }
+                Err(error) => self.show_message(error, MessageTone::Error),
+            }
+        }
+
+        let playlists = self.application.playlists();
+        if playlists.is_empty() {
+            empty_state(
+                ui,
+                "No playlists yet",
+                "Create a playlist, then add tracks from your library.",
+            );
+            return;
+        }
+
+        ui.add_space(spacing::GAP_12);
+        let mut action = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for playlist in &playlists {
+                    egui::Frame::new()
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+                        .inner_margin(egui::Margin::same(layout::CARD_INSET))
+                        .show(ui, |ui| {
+                            if self.editing_playlist == Some(playlist.id) {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.renamed_playlist_name)
+                                            .desired_width(ui.available_width() - 112.0),
+                                    );
+                                    if ui.button("Save").clicked() {
+                                        action = Some(PlaylistListAction::SaveRename(
+                                            playlist.id,
+                                            self.renamed_playlist_name.clone(),
+                                        ));
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        action = Some(PlaylistListAction::CancelRename);
+                                    }
+                                });
+                            } else if self.pending_delete_playlist == Some(playlist.id) {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Delete ‘{}’?", playlist.name));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui.button("Delete playlist").clicked() {
+                                            action = Some(PlaylistListAction::ConfirmDelete(
+                                                playlist.id,
+                                            ));
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            action = Some(PlaylistListAction::CancelDelete);
+                                        }
+                                    });
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(&playlist.name)
+                                                .size(typography::BODY_LARGE)
+                                                .strong()
+                                                .color(TEXT),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} tracks",
+                                                playlist.track_count
+                                            ))
+                                            .size(typography::CAPTION)
+                                            .color(MUTED),
+                                        );
+                                    });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui.button("Open").clicked() {
+                                            action = Some(PlaylistListAction::Open(playlist.id));
+                                        }
+                                        if ui.button("Delete").clicked() {
+                                            action =
+                                                Some(PlaylistListAction::AskDelete(playlist.id));
+                                        }
+                                        if ui.button("Rename").clicked() {
+                                            action = Some(PlaylistListAction::BeginRename(
+                                                playlist.id,
+                                                playlist.name.clone(),
+                                            ));
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    ui.add_space(spacing::GAP_5);
+                }
+            });
+
+        match action {
+            Some(PlaylistListAction::Open(playlist_id)) => {
+                self.selected_playlist = Some(playlist_id);
+            }
+            Some(PlaylistListAction::BeginRename(playlist_id, name)) => {
+                self.editing_playlist = Some(playlist_id);
+                self.renamed_playlist_name = name;
+            }
+            Some(PlaylistListAction::SaveRename(playlist_id, name)) => {
+                match self.application.rename_playlist(playlist_id, &name) {
+                    Ok(()) => {
+                        self.editing_playlist = None;
+                        self.show_message("Playlist renamed.", MessageTone::Success);
+                    }
+                    Err(error) => self.show_message(error, MessageTone::Error),
+                }
+            }
+            Some(PlaylistListAction::CancelRename) => self.editing_playlist = None,
+            Some(PlaylistListAction::AskDelete(playlist_id)) => {
+                self.pending_delete_playlist = Some(playlist_id);
+            }
+            Some(PlaylistListAction::CancelDelete) => self.pending_delete_playlist = None,
+            Some(PlaylistListAction::ConfirmDelete(playlist_id)) => {
+                match self.application.delete_playlist(playlist_id) {
+                    Ok(()) => {
+                        self.pending_delete_playlist = None;
+                        self.show_message("Playlist deleted.", MessageTone::Success);
+                    }
+                    Err(error) => self.show_message(error, MessageTone::Error),
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn draw_playlist_detail(&mut self, ui: &mut egui::Ui, playlist_id: PlaylistId) {
+        let Some(playlist) = self
+            .application
+            .playlists()
+            .into_iter()
+            .find(|playlist| playlist.id == playlist_id)
+        else {
+            self.selected_playlist = None;
+            empty_state(ui, "Playlist unavailable", "Open another playlist.");
+            return;
+        };
+
+        if ui.button("← Back to playlists").clicked() {
+            self.selected_playlist = None;
+            return;
+        }
+        ui.add_space(spacing::GAP_8);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.heading(
+                    RichText::new(&playlist.name)
+                        .size(typography::PAGE_TITLE)
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.label(
+                    RichText::new(format!("{} tracks", playlist.track_count))
+                        .size(typography::BODY)
+                        .color(MUTED),
+                );
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Add tracks").clicked() && self.application.can_edit_playlists() {
+                    self.playlist_add_target = Some(playlist_id);
+                    self.playlist_add_search.clear();
+                }
+                if ui.button("Queue all").clicked() {
+                    match self.application.queue_playlist(playlist_id) {
+                        Ok(()) => self.show_message(
+                            format!(
+                                "Queued {} tracks from {}.",
+                                playlist.track_count, playlist.name
+                            ),
+                            MessageTone::Success,
+                        ),
+                        Err(error) => self.show_message(error, MessageTone::Error),
+                    }
+                }
+                if ui.button("Play all").clicked() {
+                    match self.application.play_playlist(playlist_id) {
+                        Ok(()) => {
+                            self.page = Page::NowPlaying;
+                            self.show_message(
+                                format!("Playing {}.", playlist.name),
+                                MessageTone::Success,
+                            );
+                        }
+                        Err(error) => self.show_message(error, MessageTone::Error),
+                    }
+                }
+            });
+        });
+
+        let entries = match self.application.playlist_tracks(playlist_id) {
+            Ok(entries) => entries,
+            Err(error) => {
+                draw_message(
+                    ui,
+                    &BannerMessage {
+                        text: error,
+                        tone: MessageTone::Error,
+                    },
+                );
+                return;
+            }
+        };
+        if let Some(action) = render_playlist_track_rows(
+            ui,
+            playlist_id,
+            &entries,
+            self.application.playback().current_track_id,
+        ) {
+            match action {
+                PlaylistTrackAction::Play(track_id) => self.play_selected_track(track_id),
+                PlaylistTrackAction::Queue(track_id) => {
+                    match self.application.enqueue_track(track_id) {
+                        Ok(()) => {
+                            self.show_message("Track added to the queue.", MessageTone::Success)
+                        }
+                        Err(error) => self.show_message(error, MessageTone::Error),
+                    }
+                }
+                PlaylistTrackAction::MoveUp(index) => {
+                    if let Err(error) = self.application.move_playlist_track(
+                        playlist_id,
+                        index,
+                        index.saturating_sub(1),
+                    ) {
+                        self.show_message(error, MessageTone::Error);
+                    }
+                }
+                PlaylistTrackAction::MoveDown(index) => {
+                    if let Err(error) =
+                        self.application
+                            .move_playlist_track(playlist_id, index, index + 1)
+                    {
+                        self.show_message(error, MessageTone::Error);
+                    }
+                }
+                PlaylistTrackAction::Remove(index) => {
+                    match self.application.remove_playlist_track(playlist_id, index) {
+                        Ok(()) => {
+                            self.show_message("Track removed from the playlist.", MessageTone::Info)
+                        }
+                        Err(error) => self.show_message(error, MessageTone::Error),
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_playlist_track_picker(&mut self, context: &egui::Context) {
+        let Some(playlist_id) = self.playlist_add_target else {
+            return;
+        };
+        if !self.application.can_edit_playlists() {
+            self.playlist_add_target = None;
+            return;
+        }
+        let Some(playlist) = self
+            .application
+            .playlists()
+            .into_iter()
+            .find(|playlist| playlist.id == playlist_id)
+        else {
+            self.playlist_add_target = None;
+            return;
+        };
+
+        let search = self.playlist_add_search.trim().to_owned();
+        let tracks = if search.is_empty() {
+            self.application.tracks().to_vec()
+        } else {
+            self.application.search_tracks(&search)
+        };
+        let mut open = true;
+        let mut selected_track = None;
+        egui::Window::new(format!("Add tracks to {}", playlist.name))
+            .id(egui::Id::new(("playlist-track-picker", playlist_id)))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .open(&mut open)
+            .show(context, |ui| {
+                ui.label("Choose tracks from the current library.");
+                ui.add_space(spacing::GAP_8);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.playlist_add_search)
+                        .desired_width(ui.available_width())
+                        .hint_text("Search titles and artists"),
+                );
+                if tracks.is_empty() {
+                    empty_state(ui, "No matching tracks", "Try another title or artist.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(440.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for track in &tracks {
+                                ui.push_id(track.id, |ui| {
+                                    egui::Frame::new()
+                                        .fill(SURFACE)
+                                        .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+                                        .inner_margin(egui::Margin::same(layout::CARD_INSET))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(
+                                                        RichText::new(&track.title)
+                                                            .strong()
+                                                            .color(TEXT),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{} · {}",
+                                                            track.artist, track.album
+                                                        ))
+                                                        .size(typography::CAPTION)
+                                                        .color(MUTED),
+                                                    );
+                                                });
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        if ui.button("Add").clicked() {
+                                                            selected_track = Some(track.id);
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                        });
+                                    ui.add_space(spacing::GAP_5);
+                                });
+                            }
+                        });
+                }
+            });
+
+        if let Some(track_id) = selected_track {
+            match self
+                .application
+                .add_track_to_playlist(playlist_id, track_id)
+            {
+                Ok(()) => self.show_message("Track added to the playlist.", MessageTone::Success),
+                Err(error) => self.show_message(error, MessageTone::Error),
+            }
+        }
+        if !open {
+            self.playlist_add_target = None;
+            self.playlist_add_search.clear();
         }
     }
 
@@ -1128,6 +1596,40 @@ impl AurelisDesktop {
                 }
             }
             Err(error) => self.show_message(error, MessageTone::Error),
+        }
+    }
+
+    fn draw_universe(&mut self, ui: &mut egui::Ui) {
+        if let Some(message) = &self.message {
+            draw_message(ui, message);
+            ui.add_space(spacing::GAP_10);
+        }
+        let playback = self.application.playback();
+        let action = universe::draw(
+            ui,
+            self.application.tracks(),
+            &playback,
+            self.universe_selected_track,
+        );
+        match action {
+            Some(UniverseAction::SelectTrack(track_id)) => {
+                self.universe_selected_track = Some(track_id);
+            }
+            Some(UniverseAction::PlayTrack(track_id)) => self.play_selected_track(track_id),
+            Some(UniverseAction::QueueTrack(track_id)) => {
+                let title = self
+                    .application
+                    .track(track_id)
+                    .map(|track| track.title.clone())
+                    .unwrap_or_else(|| "Track".to_owned());
+                match self.application.enqueue_track(track_id) {
+                    Ok(()) => self
+                        .show_message(format!("Added {title} to the queue"), MessageTone::Success),
+                    Err(error) => self.show_message(error, MessageTone::Error),
+                }
+            }
+            Some(UniverseAction::OpenNowPlaying) => self.page = Page::NowPlaying,
+            None => {}
         }
     }
 
@@ -1645,6 +2147,11 @@ impl eframe::App for AurelisDesktop {
             )
             .show(ui, |ui| match self.page {
                 Page::Library => self.draw_library(ui),
+                Page::Universe => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.draw_universe(ui));
+                }
                 Page::NowPlaying => {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -1652,9 +2159,115 @@ impl eframe::App for AurelisDesktop {
                 }
             });
 
+        self.draw_playlist_track_picker(&context);
+
         context.request_repaint_after(Duration::from_millis(motion::FRAME_REFRESH_MS));
     }
 }
+
+fn render_playlist_track_rows(
+    ui: &mut egui::Ui,
+    playlist_id: PlaylistId,
+    entries: &[PlaylistTrackSummary],
+    current_track: Option<TrackId>,
+) -> Option<PlaylistTrackAction> {
+    if entries.is_empty() {
+        empty_state(
+            ui,
+            "No tracks in this playlist",
+            "Add tracks from the current library to build this playlist.",
+        );
+        return None;
+    }
+
+    let mut selected_action = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (index, entry) in entries.iter().enumerate() {
+                let selected = entry
+                    .track
+                    .as_ref()
+                    .is_some_and(|track| current_track == Some(track.id));
+                let fill = if selected { ACCENT_DARK } else { SURFACE };
+                ui.push_id((playlist_id, index), |ui| {
+                    egui::Frame::new()
+                        .fill(fill)
+                        .stroke(Stroke::new(
+                            layout::BORDER_WIDTH,
+                            if selected { ACCENT_DARK } else { EDGE },
+                        ))
+                        .inner_margin(egui::Margin::symmetric(
+                            layout::TRACK_ROW_INSET_X,
+                            layout::TRACK_ROW_INSET_Y,
+                        ))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{:02}", index + 1))
+                                        .size(typography::CAPTION)
+                                        .color(MUTED),
+                                );
+                                ui.vertical(|ui| {
+                                    if let Some(track) = &entry.track {
+                                        ui.label(RichText::new(&track.title).strong().color(TEXT));
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                track.artist, track.album
+                                            ))
+                                            .size(typography::CAPTION)
+                                            .color(MUTED),
+                                        );
+                                    } else {
+                                        ui.label(
+                                            RichText::new("Missing track").strong().color(TEXT),
+                                        );
+                                        ui.label(
+                                            RichText::new(entry.path.display().to_string())
+                                                .size(typography::CAPTION)
+                                                .color(MUTED),
+                                        );
+                                    }
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.button("Remove").clicked() {
+                                        selected_action = Some(PlaylistTrackAction::Remove(index));
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            index + 1 < entries.len(),
+                                            egui::Button::new("↓"),
+                                        )
+                                        .clicked()
+                                    {
+                                        selected_action =
+                                            Some(PlaylistTrackAction::MoveDown(index));
+                                    }
+                                    if ui.add_enabled(index > 0, egui::Button::new("↑")).clicked()
+                                    {
+                                        selected_action = Some(PlaylistTrackAction::MoveUp(index));
+                                    }
+                                    if let Some(track) = &entry.track {
+                                        if ui.button("Queue").clicked() {
+                                            selected_action =
+                                                Some(PlaylistTrackAction::Queue(track.id));
+                                        }
+                                        if ui.button("Play").clicked() {
+                                            selected_action =
+                                                Some(PlaylistTrackAction::Play(track.id));
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(spacing::GAP_5);
+                });
+            }
+        });
+    selected_action
+}
+
 fn render_track_list(
     ui: &mut egui::Ui,
     tracks: &[TrackSummary],

@@ -32,7 +32,9 @@ pub struct AudioMetadata {
 
     pub codec: String,
     pub bit_depth: Option<u16>,
-    pub bitrate: Option<u32>,
+    /// Number of bits per encoded audio sample. The cache keeps the legacy bitrate key.
+    #[serde(rename = "bitrate")]
+    pub bits_per_coded_sample: Option<u32>,
 }
 
 impl AudioMetadata {
@@ -81,7 +83,7 @@ impl AudioMetadata {
 
             bit_depth: params.bits_per_sample.map(|b| b as u16),
 
-            bitrate: params.bits_per_coded_sample,
+            bits_per_coded_sample: params.bits_per_coded_sample,
 
             ..Default::default()
         };
@@ -248,6 +250,21 @@ mod tests {
         assert!(meta.artist.is_none());
 
         assert_eq!(meta.codec, "");
+    }
+
+    #[test]
+    fn coded_bits_per_sample_round_trips_with_the_existing_cache_key() {
+        let metadata = AudioMetadata {
+            bits_per_coded_sample: Some(24),
+            ..AudioMetadata::default()
+        };
+
+        let encoded = serde_json::to_string(&metadata).expect("serialize cached metadata");
+        assert!(encoded.contains("\"bitrate\":24"));
+
+        let decoded: AudioMetadata =
+            serde_json::from_str(r#"{"bitrate":24}"#).expect("load existing cache metadata");
+        assert_eq!(decoded.bits_per_coded_sample, Some(24));
     }
 
     #[test]

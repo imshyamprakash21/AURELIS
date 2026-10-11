@@ -1,6 +1,7 @@
 mod components;
 mod theme;
 mod ui;
+mod universe;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {

@@ -11,11 +11,11 @@ mod presentation;
 pub use application::desktop::{
     AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, DesktopApplication,
     DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
-    PlaybackView, TrackSummary,
+    PlaybackView, PlaylistSummary, PlaylistTrackSummary, TrackSummary,
 };
 pub use aurelis_core::audio::{SPECTRUM_BAND_COUNT, SpectrumSnapshot};
 pub use aurelis_core::library::{
-    ArtworkVisual, Lyrics, SyncedLyricLine, SyncedLyricSegment, TrackId,
+    ArtworkVisual, Lyrics, PlaylistId, SyncedLyricLine, SyncedLyricSegment, TrackId,
 };
 
 /// Run the existing command-line interface.

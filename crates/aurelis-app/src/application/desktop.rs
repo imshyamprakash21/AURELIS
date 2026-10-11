@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -12,7 +14,8 @@ use std::{
 use aurelis_core::audio::SpectrumSnapshot;
 use aurelis_core::library::{
     Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, Lyrics, MusicLibrary,
-    Track, TrackId, TrackQuery, load_lyrics_for_track,
+    PlaylistCollection, PlaylistError, PlaylistId, Track, TrackId, TrackQuery,
+    load_lyrics_for_track,
 };
 
 use crate::player_controller::{PlaybackControlTarget, PlaybackStatus, PlayerController};
@@ -98,7 +101,7 @@ impl From<&Track> for TrackSummary {
             sample_rate: metadata.sample_rate,
             bit_depth: metadata.bit_depth,
             channels: metadata.channels,
-            bits_per_coded_sample: metadata.bitrate,
+            bits_per_coded_sample: metadata.bits_per_coded_sample,
         }
     }
 }
@@ -128,6 +131,19 @@ pub struct FolderSummary {
     pub name: String,
     pub display_path: String,
     pub track_ids: Vec<TrackId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaylistSummary {
+    pub id: PlaylistId,
+    pub name: String,
+    pub track_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaylistTrackSummary {
+    pub path: PathBuf,
+    pub track: Option<TrackSummary>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -164,6 +180,8 @@ struct ScanResult {
     library: MusicLibrary,
     summary: LibraryScanSummary,
     summaries: LibrarySummaries,
+    playlists: PlaylistCollection,
+    playlist_error: Option<String>,
 }
 
 struct LibrarySummaries {
@@ -191,6 +209,9 @@ pub struct DesktopApplication {
     lyrics_loading_track: Option<TrackId>,
     library_root: Option<PathBuf>,
     scan_result_rx: Option<Receiver<ScanResult>>,
+    playlists: PlaylistCollection,
+    playlist_path: Option<PathBuf>,
+    playlist_error: Option<String>,
 }
 
 impl DesktopApplication {
@@ -212,6 +233,9 @@ impl DesktopApplication {
             lyrics_loading_track: None,
             library_root: None,
             scan_result_rx: None,
+            playlists: PlaylistCollection::new(),
+            playlist_path: None,
+            playlist_error: None,
         }
     }
 
@@ -237,6 +261,117 @@ impl DesktopApplication {
 
     pub fn folders(&self) -> &[FolderSummary] {
         &self.folders
+    }
+
+    pub fn playlists(&self) -> Vec<PlaylistSummary> {
+        self.playlists
+            .iter()
+            .map(|playlist| PlaylistSummary {
+                id: playlist.id(),
+                name: playlist.name().to_owned(),
+                track_count: playlist.len(),
+            })
+            .collect()
+    }
+
+    pub fn playlist_tracks(
+        &self,
+        playlist_id: PlaylistId,
+    ) -> Result<Vec<PlaylistTrackSummary>, String> {
+        let playlist = self
+            .playlists
+            .get(playlist_id)
+            .ok_or_else(|| "The selected playlist is no longer available.".to_owned())?;
+        Ok(playlist
+            .tracks()
+            .iter()
+            .map(|entry| {
+                let path = entry.path().to_path_buf();
+                let track = self.library.get_by_path(&path).map(TrackSummary::from);
+                PlaylistTrackSummary { path, track }
+            })
+            .collect())
+    }
+
+    pub fn playlist_storage_error(&self) -> Option<&str> {
+        self.playlist_error.as_deref()
+    }
+
+    pub fn can_edit_playlists(&self) -> bool {
+        self.playlist_path.is_some() && self.playlist_error.is_none()
+    }
+
+    pub fn create_playlist(&mut self, name: &str) -> Result<PlaylistId, String> {
+        self.update_playlists(|playlists| playlists.create_playlist(name))
+    }
+
+    pub fn rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<(), String> {
+        self.update_playlists(|playlists| playlists.rename_playlist(id, name))
+    }
+
+    pub fn delete_playlist(&mut self, id: PlaylistId) -> Result<(), String> {
+        self.update_playlists(|playlists| playlists.delete_playlist(id).map(|_| ()))
+    }
+
+    pub fn add_track_to_playlist(
+        &mut self,
+        playlist_id: PlaylistId,
+        track_id: TrackId,
+    ) -> Result<(), String> {
+        let track = self
+            .library
+            .get(track_id)
+            .cloned()
+            .ok_or_else(|| "The selected track is no longer in the library.".to_owned())?;
+        self.update_playlists(|playlists| playlists.add_track(playlist_id, &track))
+    }
+
+    pub fn remove_playlist_track(
+        &mut self,
+        playlist_id: PlaylistId,
+        index: usize,
+    ) -> Result<(), String> {
+        self.update_playlists(|playlists| playlists.remove_track(playlist_id, index).map(|_| ()))
+    }
+
+    pub fn move_playlist_track(
+        &mut self,
+        playlist_id: PlaylistId,
+        from: usize,
+        to: usize,
+    ) -> Result<(), String> {
+        self.update_playlists(|playlists| playlists.move_track(playlist_id, from, to))
+    }
+
+    pub fn queue_playlist(&mut self, playlist_id: PlaylistId) -> Result<(), String> {
+        let track_ids = self
+            .playlists
+            .resolve_track_ids(playlist_id, &self.library)
+            .map_err(|error| error.to_string())?;
+        if track_ids.is_empty() {
+            return Err("This playlist has no tracks to queue.".to_owned());
+        }
+        self.player
+            .enqueue_tracks(&self.library, track_ids)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn play_playlist(&mut self, playlist_id: PlaylistId) -> Result<(), String> {
+        let track_ids = self
+            .playlists
+            .resolve_track_ids(playlist_id, &self.library)
+            .map_err(|error| error.to_string())?;
+        let Some((&first, remaining)) = track_ids.split_first() else {
+            return Err("This playlist has no tracks to play.".to_owned());
+        };
+
+        self.player
+            .play_track(&self.library, first)
+            .map_err(|error| error.to_string())?;
+        self.player.clear_upcoming_queue();
+        self.player
+            .enqueue_tracks(&self.library, remaining.iter().copied())
+            .map_err(|error| error.to_string())
     }
 
     pub fn search_tracks(&self, search: &str) -> Vec<TrackSummary> {
@@ -334,11 +469,15 @@ impl DesktopApplication {
                     issues: report.issues.len(),
                 };
                 let summaries = build_library_summaries(&library);
+                let playlist_path = worker_root.join(".aurelis_cache").join("playlists.json");
+                let (playlists, playlist_error) = load_playlists(&playlist_path);
                 let _ = result_tx.send(ScanResult {
                     root: worker_root,
                     library,
                     summary,
                     summaries,
+                    playlists,
+                    playlist_error,
                 });
             })
             .map_err(|error| format!("Could not start the library scan: {error}"))?;
@@ -359,6 +498,7 @@ impl DesktopApplication {
         };
         self.scan_result_rx = None;
 
+        let volume = self.player.volume();
         if let Err(error) = self.player.shutdown() {
             return Some(Err(format!(
                 "Could not stop playback before replacing the library: {error}"
@@ -366,13 +506,17 @@ impl DesktopApplication {
         }
 
         self.player = PlayerController::new();
+        self.player.set_volume(volume);
         self.library = received.library;
         self.tracks = received.summaries.tracks;
         self.albums = received.summaries.albums;
         self.artists = received.summaries.artists;
         self.genres = received.summaries.genres;
         self.folders = received.summaries.folders;
-        self.library_root = Some(received.root);
+        self.library_root = Some(received.root.clone());
+        self.playlist_path = Some(received.root.join(".aurelis_cache").join("playlists.json"));
+        self.playlists = received.playlists;
+        self.playlist_error = received.playlist_error;
         self.artwork_result_rx = None;
         self.artwork_loading_track = None;
         self.artwork_cache = Arc::new(Mutex::new(ArtworkCache::new()));
@@ -381,6 +525,38 @@ impl DesktopApplication {
         self.lyrics_cache.clear();
 
         Some(Ok(received.summary))
+    }
+
+    fn update_playlists<T>(
+        &mut self,
+        update: impl FnOnce(&mut PlaylistCollection) -> Result<T, PlaylistError>,
+    ) -> Result<T, String> {
+        let path = self
+            .playlist_path
+            .clone()
+            .ok_or_else(|| "Scan a music folder before editing playlists.".to_owned())?;
+        if let Some(error) = &self.playlist_error {
+            return Err(format!(
+                "Saved playlists could not be loaded and are protected from being overwritten: {error}"
+            ));
+        }
+
+        let mut updated = self.playlists.clone();
+        let result = update(&mut updated).map_err(|error| error.to_string())?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "The playlist storage location is invalid.".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Could not create playlist storage at {}: {error}",
+                parent.display()
+            )
+        })?;
+        updated
+            .save_to_path(&path)
+            .map_err(|error| format!("Could not save playlists: {error}"))?;
+        self.playlists = updated;
+        Ok(result)
     }
 
     /// Poll playback completion and return any playback error for presentation.
@@ -740,6 +916,22 @@ impl Drop for DesktopApplication {
     }
 }
 
+fn load_playlists(path: &Path) -> (PlaylistCollection, Option<String>) {
+    match PlaylistCollection::load_from_path(path) {
+        Ok(playlists) => (playlists, None),
+        Err(PlaylistError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
+            (PlaylistCollection::new(), None)
+        }
+        Err(error) => (
+            PlaylistCollection::new(),
+            Some(format!(
+                "Could not load playlists from {}: {error}",
+                path.display()
+            )),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -749,7 +941,7 @@ mod tests {
         time::Instant,
     };
 
-    use super::{DesktopApplication, TrackSummary, build_library_summaries};
+    use super::{DesktopApplication, LibraryScanSummary, TrackSummary, build_library_summaries};
     use aurelis_core::audio::AudioMetadata;
     use aurelis_core::library::{Lyrics, MusicLibrary, TrackId};
 
@@ -801,6 +993,20 @@ mod tests {
         fs::write(path, bytes).expect("write test WAV");
     }
 
+    fn wait_for_scan(application: &mut DesktopApplication) -> LibraryScanSummary {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(result) = application.poll_library_scan() {
+                return result.expect("apply completed library scan");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "library scan did not complete before the deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
     fn background_cached_scan_populates_real_track_summaries() {
         let directory = TemporaryDirectory::new();
@@ -813,17 +1019,7 @@ mod tests {
         assert!(application.is_scanning());
         assert!(application.begin_scan(directory.path()).is_err());
 
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let summary = loop {
-            if let Some(result) = application.poll_library_scan() {
-                break result.expect("apply completed library scan");
-            }
-            assert!(
-                Instant::now() < deadline,
-                "library scan did not complete before the deadline"
-            );
-            std::thread::yield_now();
-        };
+        let summary = wait_for_scan(&mut application);
 
         assert_eq!(summary.discovered, 1);
         assert_eq!(summary.added, 1);
@@ -834,6 +1030,145 @@ mod tests {
         assert_eq!(application.tracks()[0].codec, "PCM");
         assert_eq!(application.library_root(), Some(directory.path()));
         assert!(!application.is_scanning());
+    }
+
+    #[test]
+    fn library_scan_preserves_the_session_output_volume() {
+        let directory = TemporaryDirectory::new();
+        write_test_wav(&directory.path().join("Sample Song.wav"));
+
+        let mut application = DesktopApplication::new();
+        application.set_volume(0.37);
+        application
+            .begin_scan(directory.path())
+            .expect("start library scan");
+        wait_for_scan(&mut application);
+
+        assert_eq!(application.playback().volume, 0.37);
+    }
+
+    #[test]
+    fn desktop_playlists_persist_order_and_keep_missing_tracks_visible() {
+        let directory = TemporaryDirectory::new();
+        write_test_wav(&directory.path().join("First.wav"));
+        write_test_wav(&directory.path().join("Second.wav"));
+
+        let mut application = DesktopApplication::new();
+        application
+            .begin_scan(directory.path())
+            .expect("start library scan");
+        assert_eq!(wait_for_scan(&mut application).added, 2);
+
+        let tracks = application.tracks().to_vec();
+        let first = tracks
+            .iter()
+            .find(|track| track.title == "First")
+            .expect("first scanned track");
+        let second = tracks
+            .iter()
+            .find(|track| track.title == "Second")
+            .expect("second scanned track");
+        let playlist_id = application
+            .create_playlist("  Morning Set  ")
+            .expect("create playlist");
+        application
+            .add_track_to_playlist(playlist_id, first.id)
+            .expect("add first track");
+        application
+            .add_track_to_playlist(playlist_id, second.id)
+            .expect("add second track");
+        application
+            .move_playlist_track(playlist_id, 0, 1)
+            .expect("reorder playlist");
+        application
+            .rename_playlist(playlist_id, "Morning Drive")
+            .expect("rename playlist");
+        application
+            .queue_playlist(playlist_id)
+            .expect("queue playlist");
+        assert_eq!(
+            application.playback().queue_track_ids,
+            [second.id, first.id]
+        );
+
+        let mut reopened = DesktopApplication::new();
+        reopened
+            .begin_scan(directory.path())
+            .expect("rescan library");
+        wait_for_scan(&mut reopened);
+        let saved = reopened
+            .playlists()
+            .into_iter()
+            .find(|playlist| playlist.id == playlist_id)
+            .expect("saved playlist");
+        assert_eq!(saved.name, "Morning Drive");
+        assert_eq!(saved.track_count, 2);
+        let saved_tracks = reopened
+            .playlist_tracks(playlist_id)
+            .expect("resolve saved playlist entries");
+        assert_eq!(
+            saved_tracks
+                .iter()
+                .map(|entry| entry.track.as_ref().map(|track| track.title.as_str()))
+                .collect::<Vec<_>>(),
+            [Some("Second"), Some("First")]
+        );
+
+        fs::remove_file(&saved_tracks[0].path).expect("remove a saved playlist track");
+        let mut rescanned = DesktopApplication::new();
+        rescanned
+            .begin_scan(directory.path())
+            .expect("scan after a saved track was removed");
+        wait_for_scan(&mut rescanned);
+        let entries = rescanned
+            .playlist_tracks(playlist_id)
+            .expect("show playlist entries after rescan");
+        assert!(entries[0].track.is_none());
+        assert_eq!(
+            entries[1].track.as_ref().map(|track| track.title.as_str()),
+            Some("First")
+        );
+        assert!(
+            rescanned
+                .queue_playlist(playlist_id)
+                .expect_err("queueing must report the missing entry")
+                .contains("playlist track path is not in the library")
+        );
+        assert!(rescanned.playback().queue_track_ids.is_empty());
+    }
+
+    #[test]
+    fn corrupt_playlist_store_is_reported_and_never_overwritten() {
+        let directory = TemporaryDirectory::new();
+        write_test_wav(&directory.path().join("Sample.wav"));
+        let cache = directory.path().join(".aurelis_cache");
+        fs::create_dir_all(&cache).expect("create test library cache");
+        let playlist_path = cache.join("playlists.json");
+        let corrupt_data = b"not a playlist file";
+        fs::write(&playlist_path, corrupt_data).expect("write corrupt playlist data");
+
+        let mut application = DesktopApplication::new();
+        application
+            .begin_scan(directory.path())
+            .expect("start library scan");
+        wait_for_scan(&mut application);
+
+        assert!(!application.can_edit_playlists());
+        assert!(
+            application
+                .playlist_storage_error()
+                .is_some_and(|error| error.contains("Could not load playlists"))
+        );
+        assert!(
+            application
+                .create_playlist("Do not overwrite")
+                .expect_err("corrupt saved playlists must be protected")
+                .contains("protected from being overwritten")
+        );
+        assert_eq!(
+            fs::read(&playlist_path).expect("read protected file"),
+            corrupt_data
+        );
     }
 
     fn wait_for_lyrics(

@@ -385,7 +385,7 @@ mod tests {
             channels: Some(2),
             codec: "PCM".to_owned(),
             bit_depth: Some(24),
-            bitrate: Some(1_536_000),
+            bits_per_coded_sample: Some(24),
         };
         let tracks = vec![CachedTrack {
             id: 7,
@@ -410,6 +410,7 @@ mod tests {
         assert_eq!(decoded.tracks[0].id, 7);
         assert_eq!(decoded.tracks[0].path, PathBuf::from("Music/Artist/曲.wav"));
         assert_eq!(decoded.tracks[0].metadata.title.as_deref(), Some("曲名"));
+        assert_eq!(decoded.tracks[0].metadata.bits_per_coded_sample, Some(24));
         assert_eq!(
             decoded.tracks[0].metadata.duration,
             Some(Duration::new(31, 123_000_000))
