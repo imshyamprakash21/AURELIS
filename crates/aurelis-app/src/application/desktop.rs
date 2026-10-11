@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use aurelis_core::audio::SpectrumSnapshot;
 use aurelis_core::library::{
     Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, Lyrics, MusicLibrary,
     Track, TrackId, TrackQuery, load_lyrics_for_track,
@@ -145,6 +146,7 @@ pub struct PlaybackView {
     pub duration: Option<Duration>,
     pub queue_track_ids: Vec<TrackId>,
     pub current_queue_index: Option<usize>,
+    pub spectrum: SpectrumSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -404,6 +406,7 @@ impl DesktopApplication {
             duration: snapshot.duration(),
             queue_track_ids: snapshot.queue().track_ids().to_vec(),
             current_queue_index: snapshot.queue().current_index(),
+            spectrum: self.player.spectrum_snapshot(),
         }
     }
 

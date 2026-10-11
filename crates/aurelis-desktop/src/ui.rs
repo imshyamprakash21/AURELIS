@@ -15,7 +15,8 @@ use crate::theme::{layout, motion, palette::*, radius, spacing, typography};
 use aurelis_app::{
     AlbumSummary, ArtistSummary, ArtworkImageFormat, ArtworkView, ArtworkVisual,
     DesktopApplication, DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary,
-    LibrarySearchResults, Lyrics, PlaybackView, TrackId, TrackSummary,
+    LibrarySearchResults, Lyrics, PlaybackView, SPECTRUM_BAND_COUNT, SpectrumSnapshot, TrackId,
+    TrackSummary,
 };
 use eframe::egui::{self, Align, Color32, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
@@ -1336,6 +1337,16 @@ impl AurelisDesktop {
             });
         });
 
+        ui.add_space(spacing::GAP_26);
+        section_heading(ui, "REAL-TIME SPECTRUM · 40 BANDS");
+        ui.add_space(spacing::GAP_8);
+        draw_spectrum(
+            ui,
+            playback.spectrum,
+            playback.state,
+            artwork_tint.map_or(ACCENT, readable_artwork_accent),
+        );
+
         if !playback.queue_track_ids.is_empty() {
             ui.add_space(spacing::GAP_26);
             let upcoming_start = playback
@@ -1834,6 +1845,89 @@ fn draw_seek_control(
                     .size(typography::OVERLINE)
                     .color(MUTED),
             );
+        });
+    });
+}
+
+fn draw_spectrum(
+    ui: &mut egui::Ui,
+    spectrum: SpectrumSnapshot,
+    playback_state: DesktopPlaybackState,
+    accent: Color32,
+) {
+    const HEIGHT: f32 = 112.0;
+    const BAR_GAP: f32 = 2.0;
+
+    let width = ui.available_width().max(0.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), egui::Sense::hover());
+    let _ = response.on_hover_text("Frequency energy measured from the audio output samples.");
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, radius::WIDGET, SURFACE);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.bottom() - 1.0),
+            egui::pos2(rect.right(), rect.bottom() - 1.0),
+        ],
+        Stroke::new(layout::BORDER_WIDTH, EDGE),
+    );
+
+    let is_active = matches!(
+        playback_state,
+        DesktopPlaybackState::Playing | DesktopPlaybackState::Paused
+    );
+    let bands = spectrum.bands();
+    let has_signal = bands.iter().any(|band| *band > 0.01);
+
+    if is_active && has_signal {
+        let bar_width = (rect.width() - BAR_GAP * (SPECTRUM_BAND_COUNT.saturating_sub(1) as f32))
+            .max(0.0)
+            / SPECTRUM_BAND_COUNT as f32;
+        let max_height = (rect.height() - spacing::GAP_12).max(0.0);
+        let bar_color = if playback_state == DesktopPlaybackState::Paused {
+            accent.gamma_multiply(0.58)
+        } else {
+            accent
+        };
+
+        for (index, energy) in bands.iter().enumerate() {
+            let bar_height = energy.clamp(0.0, 1.0) * max_height;
+            if bar_height <= 0.5 || bar_width <= 0.0 {
+                continue;
+            }
+
+            let left = rect.left() + index as f32 * (bar_width + BAR_GAP);
+            let right = (left + bar_width).min(rect.right());
+            let top = rect.bottom() - spacing::GAP_6 - bar_height;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left, top),
+                    egui::pos2(right, rect.bottom() - spacing::GAP_6),
+                ),
+                radius::WIDGET,
+                bar_color,
+            );
+        }
+    } else {
+        let message = if !is_active {
+            "Play a track to see its spectrum"
+        } else if playback_state == DesktopPlaybackState::Paused {
+            "No recent output signal"
+        } else {
+            "Waiting for an audio signal"
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            message,
+            egui::FontId::proportional(typography::CAPTION),
+            MUTED,
+        );
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("LOW").size(typography::MICRO).color(MUTED));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new("HIGH").size(typography::MICRO).color(MUTED));
         });
     });
 }

@@ -77,6 +77,48 @@ impl AudioRingBuffer {
         written
     }
 
+    /// Downmix interleaved output frames and publish them to a mono analysis
+    /// ring with one atomic index update. Returns the number of frames copied.
+    pub(crate) fn push_mono_downmix(&self, input: &[f32], channels: usize) -> usize {
+        if channels == 0 {
+            return 0;
+        }
+
+        let requested_frames = input.len() / channels;
+        if requested_frames == 0 {
+            return 0;
+        }
+
+        let write = self.write.load(Ordering::Relaxed);
+        let read = self.read.load(Ordering::Acquire);
+        let available = if write >= read {
+            self.capacity - write + read - 1
+        } else {
+            read - write - 1
+        };
+        let frames = requested_frames.min(available);
+
+        for frame_index in 0..frames {
+            let frame_start = frame_index * channels;
+            let mono = input[frame_start..frame_start + channels]
+                .iter()
+                .sum::<f32>()
+                / channels as f32;
+            let index = (write + frame_index) % self.capacity;
+            unsafe {
+                let ptr = self.buffer.as_ptr() as *mut f32;
+                ptr.add(index).write(mono);
+            }
+        }
+
+        if frames > 0 {
+            self.write
+                .store((write + frames) % self.capacity, Ordering::Release);
+        }
+
+        frames
+    }
+
     /// Pop samples from the buffer.
     ///
     /// Returns the number of samples read.
@@ -139,6 +181,26 @@ mod tests {
         assert_eq!(rb.pop(&mut out), 4);
 
         assert_eq!(input, out);
+    }
+
+    #[test]
+    fn mono_downmix_publishes_interleaved_frames_in_order() {
+        let rb = AudioRingBuffer::new(8);
+        let stereo = [0.25, 0.75, -0.25, -0.75];
+
+        assert_eq!(rb.push_mono_downmix(&stereo, 2), 2);
+        let mut output = [0.0; 2];
+        assert_eq!(rb.pop(&mut output), 2);
+        assert_eq!(output, [0.5, -0.5]);
+    }
+
+    #[test]
+    fn mono_downmix_drops_frames_when_the_analysis_ring_is_full() {
+        let rb = AudioRingBuffer::new(4);
+        let stereo = [0.1, 0.3, 0.2, 0.4, 0.3, 0.5, 0.4, 0.6];
+
+        assert_eq!(rb.push_mono_downmix(&stereo, 2), 3);
+        assert_eq!(rb.len(), 3);
     }
 
     #[test]

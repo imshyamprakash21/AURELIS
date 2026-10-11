@@ -10,8 +10,13 @@ use std::{
 };
 
 use super::{
-    channel_converter::AudioChannelConverter, decoder_stream::AudioDecoder,
-    metadata::AudioMetadata, output::AudioOutput, resampler::AudioResampler, types::AudioSpec,
+    channel_converter::AudioChannelConverter,
+    decoder_stream::AudioDecoder,
+    metadata::AudioMetadata,
+    output::AudioOutput,
+    resampler::AudioResampler,
+    spectrum::{SpectrumShared, SpectrumSnapshot},
+    types::AudioSpec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +60,7 @@ impl PlaybackWorker {
         path: String,
         played_frames: Arc<AtomicU64>,
         pending_seek: Arc<Mutex<Option<Duration>>>,
+        spectrum: Arc<SpectrumShared>,
     ) -> Result<Self, Box<dyn Error>> {
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
 
@@ -63,7 +69,13 @@ impl PlaybackWorker {
         let handle = thread::Builder::new()
             .name("aurelis-playback".to_string())
             .spawn(move || {
-                let result = run_playback_pipeline(&path, &command_rx, played_frames, pending_seek);
+                let result = run_playback_pipeline(
+                    &path,
+                    &command_rx,
+                    played_frames,
+                    pending_seek,
+                    spectrum,
+                );
 
                 let worker_result = match result {
                     Ok(WorkerPipelineResult::Completed) => WorkerResult::Completed,
@@ -156,6 +168,8 @@ pub struct PlaybackEngine {
     played_frames: Arc<AtomicU64>,
 
     pending_seek: Arc<Mutex<Option<Duration>>>,
+
+    spectrum: Arc<SpectrumShared>,
 }
 
 impl PlaybackEngine {
@@ -190,6 +204,8 @@ impl PlaybackEngine {
             played_frames: Arc::new(AtomicU64::new(0)),
 
             pending_seek: Arc::new(Mutex::new(None)),
+
+            spectrum: Arc::new(SpectrumShared::new()),
         })
     }
 
@@ -213,6 +229,11 @@ impl PlaybackEngine {
 
     pub fn metadata(&self) -> &AudioMetadata {
         &self.metadata
+    }
+
+    /// Read the latest real-time spectrum derived from output PCM samples.
+    pub fn spectrum_snapshot(&self) -> SpectrumSnapshot {
+        self.spectrum.snapshot()
     }
 
     pub fn is_resampling(&self) -> bool {
@@ -258,11 +279,13 @@ impl PlaybackEngine {
         println!("Starting playback...");
 
         self.played_frames.store(0, Ordering::Relaxed);
+        self.spectrum.clear();
 
         let worker = PlaybackWorker::start(
             self.path.clone(),
             Arc::clone(&self.played_frames),
             Arc::clone(&self.pending_seek),
+            Arc::clone(&self.spectrum),
         )?;
 
         self.worker = Some(worker);
@@ -442,10 +465,12 @@ fn run_playback_pipeline(
     command_rx: &mpsc::Receiver<WorkerCommand>,
     played_frames: Arc<AtomicU64>,
     pending_seek: Arc<Mutex<Option<Duration>>>,
+    spectrum: Arc<SpectrumShared>,
 ) -> Result<WorkerPipelineResult, Box<dyn Error>> {
     let mut decoder = AudioDecoder::open(path)?;
 
-    let output = AudioOutput::open_with_position(decoder.spec(), Arc::clone(&played_frames))?;
+    let output =
+        AudioOutput::open_with_spectrum(decoder.spec(), Arc::clone(&played_frames), spectrum)?;
 
     let output_spec = output.spec();
 

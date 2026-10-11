@@ -13,6 +13,7 @@ pub use application::desktop::{
     DesktopPlaybackState, FolderSummary, GenreSummary, LibraryScanSummary, LibrarySearchResults,
     PlaybackView, TrackSummary,
 };
+pub use aurelis_core::audio::{SPECTRUM_BAND_COUNT, SpectrumSnapshot};
 pub use aurelis_core::library::{
     ArtworkVisual, Lyrics, SyncedLyricLine, SyncedLyricSegment, TrackId,
 };

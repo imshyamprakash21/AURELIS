@@ -6,7 +6,11 @@ use std::sync::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::{ring_buffer::AudioRingBuffer, types::AudioSpec};
+use super::{
+    ring_buffer::AudioRingBuffer,
+    spectrum::{SpectrumProcessor, SpectrumShared},
+    types::AudioSpec,
+};
 
 /// Real-time PCM audio output backed by CPAL.
 ///
@@ -19,6 +23,7 @@ pub struct AudioOutput {
     buffer: Arc<AudioRingBuffer>,
     needs_rebuild: Arc<AtomicBool>,
     callback_state: Arc<OutputCallbackState>,
+    _spectrum_processor: Option<SpectrumProcessor>,
 }
 
 #[derive(Default)]
@@ -133,6 +138,22 @@ impl AudioOutput {
         requested: AudioSpec,
         played_frames: Arc<AtomicU64>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::open_internal(requested, played_frames, None)
+    }
+
+    pub(crate) fn open_with_spectrum(
+        requested: AudioSpec,
+        played_frames: Arc<AtomicU64>,
+        spectrum: Arc<SpectrumShared>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::open_internal(requested, played_frames, Some(spectrum))
+    }
+
+    fn open_internal(
+        requested: AudioSpec,
+        played_frames: Arc<AtomicU64>,
+        spectrum: Option<Arc<SpectrumShared>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let host = cpal::default_host();
 
         let device = host
@@ -160,6 +181,14 @@ impl AudioOutput {
 
         let buffer = Arc::new(AudioRingBuffer::new(262_144));
 
+        let (callback_spectrum_buffer, spectrum_processor) = if let Some(spectrum) = spectrum {
+            let (processor, analysis_buffer) =
+                SpectrumProcessor::start(device_spec.sample_rate, spectrum)?;
+            (Some(analysis_buffer), Some(processor))
+        } else {
+            (None, None)
+        };
+
         let callback_buffer = Arc::clone(&buffer);
         let callback_played_frames = Arc::clone(&played_frames);
         let callback_state = Arc::new(OutputCallbackState::default());
@@ -174,12 +203,13 @@ impl AudioOutput {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 config,
                 move |output: &mut [f32], _| {
-                    fill_output(
+                    fill_output_with_analysis(
                         output,
                         &callback_buffer,
                         output_channels,
                         &callback_played_frames,
                         &callback_output_state,
+                        callback_spectrum_buffer.as_deref(),
                     );
                 },
                 move |err| {
@@ -212,6 +242,7 @@ impl AudioOutput {
             buffer,
             needs_rebuild: rebuild_flag,
             callback_state,
+            _spectrum_processor: spectrum_processor,
         })
     }
 
@@ -304,12 +335,31 @@ impl AudioOutput {
     }
 }
 
+#[cfg(test)]
 fn fill_output(
     output: &mut [f32],
     buffer: &Arc<AudioRingBuffer>,
     channels: usize,
     played_frames: &AtomicU64,
     callback_state: &OutputCallbackState,
+) {
+    fill_output_with_analysis(
+        output,
+        buffer,
+        channels,
+        played_frames,
+        callback_state,
+        None,
+    );
+}
+
+fn fill_output_with_analysis(
+    output: &mut [f32],
+    buffer: &Arc<AudioRingBuffer>,
+    channels: usize,
+    played_frames: &AtomicU64,
+    callback_state: &OutputCallbackState,
+    spectrum_buffer: Option<&AudioRingBuffer>,
 ) {
     let already_active = callback_state
         .callbacks_active
@@ -328,6 +378,10 @@ fn fill_output(
 
     if channels > 0 {
         played_frames.fetch_add((read / channels) as u64, Ordering::Relaxed);
+
+        if let Some(spectrum_buffer) = spectrum_buffer {
+            let _ = spectrum_buffer.push_mono_downmix(&output[..read], channels);
+        }
     }
 
     if read < output.len() {
@@ -385,6 +439,29 @@ mod tests {
         let mut out = [0.0; 6];
         fill_output(&mut out, &rb, 2, &played_frames, &playing_callback_state());
 
+        assert_eq!(played_frames.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn callback_captures_only_consumed_output_pcm_for_spectrum_analysis() {
+        let output_buffer = Arc::new(AudioRingBuffer::new(16));
+        let analysis_buffer = AudioRingBuffer::new(16);
+        let played_frames = AtomicU64::new(0);
+        output_buffer.push(&[0.25, 0.75, -0.25, -0.75]);
+
+        let mut output = [0.0; 6];
+        fill_output_with_analysis(
+            &mut output,
+            &output_buffer,
+            2,
+            &played_frames,
+            &playing_callback_state(),
+            Some(&analysis_buffer),
+        );
+
+        let mut analyzed = [0.0; 2];
+        assert_eq!(analysis_buffer.pop(&mut analyzed), 2);
+        assert_eq!(analyzed, [0.5, -0.5]);
         assert_eq!(played_frames.load(Ordering::Relaxed), 2);
     }
 

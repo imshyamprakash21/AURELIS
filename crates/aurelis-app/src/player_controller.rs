@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, io, path::Path, time::Duration};
 
 use aurelis_core::{
-    audio::{PlaybackEndReason, PlaybackEngine},
+    audio::{PlaybackEndReason, PlaybackEngine, SpectrumSnapshot},
     library::{MusicLibrary, Track, TrackId},
 };
 
@@ -103,6 +103,10 @@ pub(crate) trait PlaybackControlTarget {
     ) -> Option<Result<PlaybackEndReason, Box<dyn Error>>>;
     fn wait(&mut self) -> Result<PlaybackEndReason, Box<dyn Error>>;
 
+    fn spectrum_snapshot(&self) -> SpectrumSnapshot {
+        SpectrumSnapshot::default()
+    }
+
     fn current_track_id(&self) -> Option<TrackId> {
         None
     }
@@ -166,6 +170,10 @@ impl PlaybackControlTarget for PlaybackEngine {
 
     fn wait(&mut self) -> Result<PlaybackEndReason, Box<dyn Error>> {
         PlaybackEngine::wait_end(self)
+    }
+
+    fn spectrum_snapshot(&self) -> SpectrumSnapshot {
+        PlaybackEngine::spectrum_snapshot(self)
     }
 }
 
@@ -334,6 +342,14 @@ impl PlayerController {
 
     pub(crate) fn playback_state(&self) -> PlaybackStatus {
         self.session.state
+    }
+
+    pub(crate) fn spectrum_snapshot(&self) -> SpectrumSnapshot {
+        self.engine
+            .as_ref()
+            .map_or_else(SpectrumSnapshot::default, |engine| {
+                engine.spectrum_snapshot()
+            })
     }
 
     /// Copy the current app state for a UI or CLI renderer.
