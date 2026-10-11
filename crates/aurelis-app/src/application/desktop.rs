@@ -147,6 +147,7 @@ pub struct PlaybackView {
     pub queue_track_ids: Vec<TrackId>,
     pub current_queue_index: Option<usize>,
     pub spectrum: SpectrumSnapshot,
+    pub volume: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -407,6 +408,7 @@ impl DesktopApplication {
             queue_track_ids: snapshot.queue().track_ids().to_vec(),
             current_queue_index: snapshot.queue().current_index(),
             spectrum: self.player.spectrum_snapshot(),
+            volume: self.player.volume(),
         }
     }
 
@@ -470,6 +472,11 @@ impl DesktopApplication {
 
     pub fn stop(&mut self) {
         self.player.stop();
+    }
+
+    /// Set the application-wide output volume for current and future playback.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.player.set_volume(volume);
     }
 
     pub fn play_next(&mut self) -> Result<Option<TrackId>, String> {

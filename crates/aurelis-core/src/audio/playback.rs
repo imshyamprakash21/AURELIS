@@ -2,7 +2,7 @@ use std::{
     error::Error,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -61,6 +61,7 @@ impl PlaybackWorker {
         played_frames: Arc<AtomicU64>,
         pending_seek: Arc<Mutex<Option<Duration>>>,
         spectrum: Arc<SpectrumShared>,
+        volume: Arc<AtomicU32>,
     ) -> Result<Self, Box<dyn Error>> {
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
 
@@ -75,6 +76,7 @@ impl PlaybackWorker {
                     played_frames,
                     pending_seek,
                     spectrum,
+                    volume,
                 );
 
                 let worker_result = match result {
@@ -170,6 +172,8 @@ pub struct PlaybackEngine {
     pending_seek: Arc<Mutex<Option<Duration>>>,
 
     spectrum: Arc<SpectrumShared>,
+
+    volume: Arc<AtomicU32>,
 }
 
 impl PlaybackEngine {
@@ -206,6 +210,8 @@ impl PlaybackEngine {
             pending_seek: Arc::new(Mutex::new(None)),
 
             spectrum: Arc::new(SpectrumShared::new()),
+
+            volume: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         })
     }
 
@@ -234,6 +240,21 @@ impl PlaybackEngine {
     /// Read the latest real-time spectrum derived from output PCM samples.
     pub fn spectrum_snapshot(&self) -> SpectrumSnapshot {
         self.spectrum.snapshot()
+    }
+
+    /// Current normalized output volume in the range `0.0..=1.0`.
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Set the output volume without interrupting playback.
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
     }
 
     pub fn is_resampling(&self) -> bool {
@@ -286,6 +307,7 @@ impl PlaybackEngine {
             Arc::clone(&self.played_frames),
             Arc::clone(&self.pending_seek),
             Arc::clone(&self.spectrum),
+            Arc::clone(&self.volume),
         )?;
 
         self.worker = Some(worker);
@@ -466,11 +488,16 @@ fn run_playback_pipeline(
     played_frames: Arc<AtomicU64>,
     pending_seek: Arc<Mutex<Option<Duration>>>,
     spectrum: Arc<SpectrumShared>,
+    volume: Arc<AtomicU32>,
 ) -> Result<WorkerPipelineResult, Box<dyn Error>> {
     let mut decoder = AudioDecoder::open(path)?;
 
-    let output =
-        AudioOutput::open_with_spectrum(decoder.spec(), Arc::clone(&played_frames), spectrum)?;
+    let output = AudioOutput::open_with_spectrum(
+        decoder.spec(),
+        Arc::clone(&played_frames),
+        spectrum,
+        volume,
+    )?;
 
     let output_spec = output.spec();
 

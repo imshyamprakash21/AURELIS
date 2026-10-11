@@ -103,6 +103,8 @@ pub(crate) trait PlaybackControlTarget {
     ) -> Option<Result<PlaybackEndReason, Box<dyn Error>>>;
     fn wait(&mut self) -> Result<PlaybackEndReason, Box<dyn Error>>;
 
+    fn set_volume(&mut self, _volume: f32) {}
+
     fn spectrum_snapshot(&self) -> SpectrumSnapshot {
         SpectrumSnapshot::default()
     }
@@ -174,6 +176,10 @@ impl PlaybackControlTarget for PlaybackEngine {
 
     fn spectrum_snapshot(&self) -> SpectrumSnapshot {
         PlaybackEngine::spectrum_snapshot(self)
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        PlaybackEngine::set_volume(self, volume);
     }
 }
 
@@ -312,6 +318,7 @@ pub(crate) struct PlayerController {
     factory: Box<dyn PlaybackFactory>,
     engine: Option<Box<dyn PlaybackControlTarget>>,
     session: PlaybackSession,
+    volume: f32,
 }
 
 impl PlayerController {
@@ -324,6 +331,7 @@ impl PlayerController {
             factory,
             engine: None,
             session: PlaybackSession::default(),
+            volume: 1.0,
         }
     }
 
@@ -350,6 +358,21 @@ impl PlayerController {
             .map_or_else(SpectrumSnapshot::default, |engine| {
                 engine.spectrum_snapshot()
             })
+    }
+
+    pub(crate) fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub(crate) fn set_volume(&mut self, volume: f32) {
+        if !volume.is_finite() {
+            return;
+        }
+
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_volume(self.volume);
+        }
     }
 
     /// Copy the current app state for a UI or CLI renderer.
@@ -551,6 +574,7 @@ impl PlayerController {
             .factory
             .open(path)
             .map_err(PlayerControllerError::Playback)?;
+        session.set_volume(self.volume);
         if let Err(error) = session.play() {
             self.session.state = PlaybackStatus::Stopped;
             return Err(PlayerControllerError::Playback(error));
@@ -732,6 +756,7 @@ mod tests {
         state: PlaybackStatus,
         end_reason: Option<PlaybackEndReason>,
         position: Duration,
+        volume: f32,
         stop_calls: usize,
         wait_calls: usize,
         seek_offsets: Vec<i64>,
@@ -764,6 +789,7 @@ mod tests {
                 state: PlaybackStatus::Stopped,
                 end_reason: None,
                 position: Duration::ZERO,
+                volume: 1.0,
                 stop_calls: 0,
                 wait_calls: 0,
                 seek_offsets: Vec::new(),
@@ -778,6 +804,10 @@ mod tests {
     }
 
     impl PlaybackControlTarget for FakeSession {
+        fn set_volume(&mut self, volume: f32) {
+            self.state.lock().unwrap().volume = volume;
+        }
+
         fn play(&mut self) -> AppResult<()> {
             self.state.lock().unwrap().state = PlaybackStatus::Playing;
             Ok(())
@@ -856,6 +886,28 @@ mod tests {
 
     fn controller(factory: &FakeFactory) -> PlayerController {
         PlayerController::with_factory(Box::new(factory.clone()))
+    }
+
+    #[test]
+    fn volume_is_clamped_and_applied_to_current_and_future_sessions() {
+        let (library, track_id, _, _) = test_library();
+        let factory = FakeFactory::default();
+        let mut controller = controller(&factory);
+
+        controller.set_volume(0.35);
+        controller
+            .play_track(&library, track_id)
+            .expect("play track");
+        let session = factory.sessions()[0].clone();
+        assert_eq!(session.lock().unwrap().volume, 0.35);
+
+        controller.set_volume(1.5);
+        assert_eq!(session.lock().unwrap().volume, 1.0);
+        controller.set_volume(-0.5);
+        assert_eq!(session.lock().unwrap().volume, 0.0);
+        controller.set_volume(f32::NAN);
+        assert_eq!(controller.volume(), 0.0);
+        assert_eq!(session.lock().unwrap().volume, 0.0);
     }
 
     fn mark_completed(factory: &FakeFactory, session_index: usize) {

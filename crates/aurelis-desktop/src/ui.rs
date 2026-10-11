@@ -647,6 +647,8 @@ impl AurelisDesktop {
             .and_then(|id| self.application.track(id))
             .cloned();
         let mut action = None;
+        let mut volume = playback.volume;
+        let mut volume_changed = false;
 
         ui.horizontal(|ui| {
             ui.add_space(spacing::GAP_5);
@@ -756,6 +758,19 @@ impl AurelisDesktop {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let volume_response = ui.add_sized(
+                    Vec2::new(88.0, 18.0),
+                    egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                );
+                volume_changed = volume_response.changed();
+                volume_response.on_hover_text("Output volume");
+                ui.label(
+                    RichText::new(format!("{}%", (volume * 100.0).round() as u32))
+                        .size(typography::CAPTION)
+                        .color(MUTED),
+                );
+                ui.label(RichText::new("VOL").size(typography::CAPTION).color(MUTED));
+                ui.add_space(spacing::GAP_8);
                 let progress = playback
                     .duration
                     .filter(|duration| !duration.is_zero())
@@ -779,6 +794,9 @@ impl AurelisDesktop {
             });
         });
 
+        if volume_changed {
+            self.application.set_volume(volume);
+        }
         if let Some(action) = action {
             self.perform_transport(action);
         }

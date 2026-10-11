@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -30,6 +30,12 @@ pub struct AudioOutput {
 struct OutputCallbackState {
     playing: AtomicBool,
     callbacks_active: AtomicUsize,
+}
+
+struct OutputAnalysis<'a> {
+    spectrum_buffer: Option<&'a AudioRingBuffer>,
+    volume: &'a AtomicU32,
+    current_volume: &'a mut f32,
 }
 
 impl OutputCallbackState {
@@ -138,21 +144,28 @@ impl AudioOutput {
         requested: AudioSpec,
         played_frames: Arc<AtomicU64>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::open_internal(requested, played_frames, None)
+        Self::open_internal(
+            requested,
+            played_frames,
+            None,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+        )
     }
 
     pub(crate) fn open_with_spectrum(
         requested: AudioSpec,
         played_frames: Arc<AtomicU64>,
         spectrum: Arc<SpectrumShared>,
+        volume: Arc<AtomicU32>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::open_internal(requested, played_frames, Some(spectrum))
+        Self::open_internal(requested, played_frames, Some(spectrum), volume)
     }
 
     fn open_internal(
         requested: AudioSpec,
         played_frames: Arc<AtomicU64>,
         spectrum: Option<Arc<SpectrumShared>>,
+        volume: Arc<AtomicU32>,
     ) -> Result<Self, Box<dyn Error>> {
         let host = cpal::default_host();
 
@@ -194,6 +207,8 @@ impl AudioOutput {
         let callback_state = Arc::new(OutputCallbackState::default());
         let callback_output_state = Arc::clone(&callback_state);
         let output_channels = device_spec.channels;
+        let callback_volume = Arc::clone(&volume);
+        let mut callback_current_volume = f32::from_bits(callback_volume.load(Ordering::Relaxed));
 
         let rebuild_flag = Arc::new(AtomicBool::new(false));
 
@@ -203,13 +218,18 @@ impl AudioOutput {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 config,
                 move |output: &mut [f32], _| {
+                    let mut analysis = OutputAnalysis {
+                        spectrum_buffer: callback_spectrum_buffer.as_deref(),
+                        volume: &callback_volume,
+                        current_volume: &mut callback_current_volume,
+                    };
                     fill_output_with_analysis(
                         output,
                         &callback_buffer,
                         output_channels,
                         &callback_played_frames,
                         &callback_output_state,
-                        callback_spectrum_buffer.as_deref(),
+                        &mut analysis,
                     );
                 },
                 move |err| {
@@ -343,13 +363,20 @@ fn fill_output(
     played_frames: &AtomicU64,
     callback_state: &OutputCallbackState,
 ) {
+    let volume = AtomicU32::new(1.0_f32.to_bits());
+    let mut current_volume = 1.0;
+    let mut analysis = OutputAnalysis {
+        spectrum_buffer: None,
+        volume: &volume,
+        current_volume: &mut current_volume,
+    };
     fill_output_with_analysis(
         output,
         buffer,
         channels,
         played_frames,
         callback_state,
-        None,
+        &mut analysis,
     );
 }
 
@@ -359,7 +386,7 @@ fn fill_output_with_analysis(
     channels: usize,
     played_frames: &AtomicU64,
     callback_state: &OutputCallbackState,
-    spectrum_buffer: Option<&AudioRingBuffer>,
+    analysis: &mut OutputAnalysis<'_>,
 ) {
     let already_active = callback_state
         .callbacks_active
@@ -379,7 +406,21 @@ fn fill_output_with_analysis(
     if channels > 0 {
         played_frames.fetch_add((read / channels) as u64, Ordering::Relaxed);
 
-        if let Some(spectrum_buffer) = spectrum_buffer {
+        if read > 0 {
+            let requested_volume = f32::from_bits(analysis.volume.load(Ordering::Relaxed));
+            let target_volume = if requested_volume.is_finite() {
+                requested_volume.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let volume_step = (target_volume - *analysis.current_volume) / read as f32;
+            for (index, sample) in output[..read].iter_mut().enumerate() {
+                *sample *= *analysis.current_volume + volume_step * (index + 1) as f32;
+            }
+            *analysis.current_volume = target_volume;
+        }
+
+        if let Some(spectrum_buffer) = analysis.spectrum_buffer {
             let _ = spectrum_buffer.push_mono_downmix(&output[..read], channels);
         }
     }
@@ -447,22 +488,92 @@ mod tests {
         let output_buffer = Arc::new(AudioRingBuffer::new(16));
         let analysis_buffer = AudioRingBuffer::new(16);
         let played_frames = AtomicU64::new(0);
+        let volume = AtomicU32::new(1.0_f32.to_bits());
+        let mut current_volume = 1.0;
         output_buffer.push(&[0.25, 0.75, -0.25, -0.75]);
 
         let mut output = [0.0; 6];
-        fill_output_with_analysis(
-            &mut output,
-            &output_buffer,
-            2,
-            &played_frames,
-            &playing_callback_state(),
-            Some(&analysis_buffer),
-        );
+        {
+            let mut analysis = OutputAnalysis {
+                spectrum_buffer: Some(&analysis_buffer),
+                volume: &volume,
+                current_volume: &mut current_volume,
+            };
+            fill_output_with_analysis(
+                &mut output,
+                &output_buffer,
+                2,
+                &played_frames,
+                &playing_callback_state(),
+                &mut analysis,
+            );
+        }
 
         let mut analyzed = [0.0; 2];
         assert_eq!(analysis_buffer.pop(&mut analyzed), 2);
         assert_eq!(analyzed, [0.5, -0.5]);
         assert_eq!(played_frames.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn callback_scales_output_and_spectrum_with_the_selected_volume() {
+        let output_buffer = Arc::new(AudioRingBuffer::new(16));
+        let analysis_buffer = AudioRingBuffer::new(16);
+        let played_frames = AtomicU64::new(0);
+        let volume = AtomicU32::new(0.5_f32.to_bits());
+        let mut current_volume = 0.5;
+        output_buffer.push(&[0.25, 0.75, -0.25, -0.75]);
+
+        let mut output = [0.0; 4];
+        {
+            let mut analysis = OutputAnalysis {
+                spectrum_buffer: Some(&analysis_buffer),
+                volume: &volume,
+                current_volume: &mut current_volume,
+            };
+            fill_output_with_analysis(
+                &mut output,
+                &output_buffer,
+                2,
+                &played_frames,
+                &playing_callback_state(),
+                &mut analysis,
+            );
+        }
+
+        assert_eq!(output, [0.125, 0.375, -0.125, -0.375]);
+        let mut analyzed = [0.0; 2];
+        assert_eq!(analysis_buffer.pop(&mut analyzed), 2);
+        assert_eq!(analyzed, [0.25, -0.25]);
+    }
+
+    #[test]
+    fn callback_ramps_volume_changes_across_consumed_samples() {
+        let output_buffer = Arc::new(AudioRingBuffer::new(8));
+        let played_frames = AtomicU64::new(0);
+        let volume = AtomicU32::new(0.0_f32.to_bits());
+        let mut current_volume = 1.0;
+        output_buffer.push(&[1.0; 4]);
+
+        let mut output = [0.0; 4];
+        {
+            let mut analysis = OutputAnalysis {
+                spectrum_buffer: None,
+                volume: &volume,
+                current_volume: &mut current_volume,
+            };
+            fill_output_with_analysis(
+                &mut output,
+                &output_buffer,
+                1,
+                &played_frames,
+                &playing_callback_state(),
+                &mut analysis,
+            );
+        }
+
+        assert_eq!(output, [0.75, 0.5, 0.25, 0.0]);
+        assert_eq!(current_volume, 0.0);
     }
 
     #[test]
