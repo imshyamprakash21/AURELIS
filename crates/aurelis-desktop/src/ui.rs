@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::components::{
@@ -29,6 +29,7 @@ enum Page {
     Library,
     Universe,
     NowPlaying,
+    Analytics,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -681,6 +682,10 @@ impl AurelisDesktop {
         ui.add_space(spacing::GAP_6);
         if navigation_button(ui, "03", "Universe", self.page == Page::Universe) {
             self.page = Page::Universe;
+        }
+        ui.add_space(spacing::GAP_6);
+        if navigation_button(ui, "04", "Analytics", self.page == Page::Analytics) {
+            self.page = Page::Analytics;
         }
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
@@ -1513,6 +1518,122 @@ impl AurelisDesktop {
         });
     }
 
+    fn draw_analytics(&mut self, ui: &mut egui::Ui) {
+        let analytics = self.application.listening_analytics().clone();
+        ui.add_space(spacing::GAP_34);
+        ui.label(
+            RichText::new("YOUR LISTENING")
+                .size(typography::CAPTION)
+                .strong()
+                .color(ACCENT),
+        );
+        ui.add_space(spacing::GAP_8);
+        ui.heading(
+            RichText::new("Analytics")
+                .size(typography::PAGE_TITLE)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(spacing::GAP_8);
+        ui.label(
+            RichText::new("Playback starts are saved locally for this music library.")
+                .size(typography::BODY)
+                .color(MUTED),
+        );
+        ui.add_space(spacing::GAP_18);
+
+        if let Some(error) = self.application.listening_history_storage_error() {
+            draw_message(
+                ui,
+                &BannerMessage {
+                    text: error.to_owned(),
+                    tone: MessageTone::Error,
+                },
+            );
+            ui.add_space(spacing::GAP_10);
+        }
+
+        if analytics.total_play_starts == 0 {
+            empty_state(
+                ui,
+                "No listening history yet",
+                "Play a track from this library. AURELIS will show real recent plays and favorites here.",
+            );
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            library_statistic(ui, "Play starts", analytics.total_play_starts);
+            library_statistic(ui, "Unique tracks", analytics.unique_tracks);
+            library_statistic(ui, "Known artists", analytics.unique_artists);
+        });
+        ui.add_space(spacing::GAP_22);
+
+        let track_ids: HashMap<_, _> = self
+            .application
+            .tracks()
+            .iter()
+            .map(|track| (track.path.clone(), track.id))
+            .collect();
+        let mut selected_track = None;
+        ui.columns(2, |columns| {
+            section_heading(&mut columns[0], "MOST PLAYED TRACKS");
+            columns[0].add_space(spacing::GAP_8);
+            if analytics.top_tracks.is_empty() {
+                columns[0].label(RichText::new("No track plays recorded.").color(MUTED));
+            }
+            for track in &analytics.top_tracks {
+                let subtitle = format!("{} · {}", track.artist, track.album);
+                if listening_analytics_row(
+                    &mut columns[0],
+                    &track.title,
+                    &subtitle,
+                    &format!("{} plays", track.play_count),
+                    track_ids.contains_key(&track.path),
+                ) {
+                    selected_track = track_ids.get(&track.path).copied();
+                }
+            }
+
+            section_heading(&mut columns[1], "MOST PLAYED ARTISTS");
+            columns[1].add_space(spacing::GAP_8);
+            if analytics.top_artists.is_empty() {
+                columns[1].label(
+                    RichText::new("Artist tags are not available for these plays.").color(MUTED),
+                );
+            }
+            for artist in &analytics.top_artists {
+                listening_analytics_row(
+                    &mut columns[1],
+                    &artist.artist,
+                    "Artist",
+                    &format!("{} plays", artist.play_count),
+                    false,
+                );
+            }
+        });
+
+        ui.add_space(spacing::GAP_22);
+        section_heading(ui, "RECENT PLAYBACK");
+        ui.add_space(spacing::GAP_8);
+        for play in &analytics.recent_plays {
+            let subtitle = format!("{} · {}", play.artist, play.album);
+            if listening_analytics_row(
+                ui,
+                &play.title,
+                &subtitle,
+                &relative_play_time(play.played_at_unix_seconds),
+                track_ids.contains_key(&play.path),
+            ) {
+                selected_track = track_ids.get(&play.path).copied();
+            }
+        }
+
+        if let Some(track_id) = selected_track {
+            self.play_selected_track(track_id);
+        }
+    }
+
     fn draw_album_groups(&mut self, ui: &mut egui::Ui) {
         let groups = self.application.albums();
         if groups.is_empty() {
@@ -2160,11 +2281,85 @@ impl eframe::App for AurelisDesktop {
                         .auto_shrink([false, false])
                         .show(ui, |ui| self.draw_now_playing(ui));
                 }
+                Page::Analytics => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.draw_analytics(ui));
+                }
             });
 
         self.draw_playlist_track_picker(&context);
 
         context.request_repaint_after(Duration::from_millis(motion::FRAME_REFRESH_MS));
+    }
+}
+
+fn listening_analytics_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    trailing: &str,
+    can_play: bool,
+) -> bool {
+    let mut clicked = false;
+    Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(layout::BORDER_WIDTH, EDGE))
+        .inner_margin(egui::Margin::symmetric(
+            layout::TRACK_ROW_INSET_X,
+            layout::TRACK_ROW_INSET_Y,
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let title_size = (ui.available_width() - 82.0).max(80.0);
+                let title_text = RichText::new(title)
+                    .size(typography::BODY)
+                    .strong()
+                    .color(TEXT);
+                if can_play {
+                    clicked = ui
+                        .add_sized(
+                            [title_size, layout::TRACK_ROW_BUTTON_HEIGHT],
+                            egui::Button::new(title_text)
+                                .fill(SURFACE)
+                                .stroke(Stroke::NONE),
+                        )
+                        .clicked();
+                } else {
+                    ui.add_sized(
+                        [title_size, layout::TRACK_ROW_BUTTON_HEIGHT],
+                        egui::Label::new(title_text),
+                    );
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(trailing)
+                            .size(typography::CAPTION)
+                            .color(ACCENT),
+                    );
+                });
+            });
+            ui.label(
+                RichText::new(subtitle)
+                    .size(typography::BODY_SMALL)
+                    .color(MUTED),
+            );
+        });
+    ui.add_space(spacing::GAP_5);
+    clicked
+}
+
+fn relative_play_time(played_at_unix_seconds: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let elapsed = now.saturating_sub(played_at_unix_seconds);
+    match elapsed {
+        0..=59 => "Just now".to_owned(),
+        60..=3_599 => format!("{} min ago", elapsed / 60),
+        3_600..=86_399 => format!("{} hr ago", elapsed / 3_600),
+        _ => format!("{} days ago", elapsed / 86_400),
     }
 }
 

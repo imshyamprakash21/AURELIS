@@ -319,6 +319,7 @@ pub(crate) struct PlayerController {
     engine: Option<Box<dyn PlaybackControlTarget>>,
     session: PlaybackSession,
     volume: f32,
+    session_generation: u64,
 }
 
 impl PlayerController {
@@ -332,7 +333,14 @@ impl PlayerController {
             engine: None,
             session: PlaybackSession::default(),
             volume: 1.0,
+            session_generation: 0,
         }
+    }
+
+    /// Changes after each successfully started playback session, including a
+    /// replay of the same track.
+    pub(crate) fn session_generation(&self) -> u64 {
+        self.session_generation
     }
 
     pub(crate) fn current_track_id(&self) -> Option<TrackId> {
@@ -584,6 +592,7 @@ impl PlayerController {
         self.session.current_track_id = Some(track_id);
         self.session.state = PlaybackStatus::Playing;
         self.session.last_position = Duration::ZERO;
+        self.session_generation = self.session_generation.wrapping_add(1);
         Ok(())
     }
 
@@ -938,6 +947,19 @@ mod tests {
         assert_eq!(snapshot.queue().previous_track_id(), None);
         assert_eq!(controller.next(&test_library().0).unwrap(), None);
         assert_eq!(controller.previous(&test_library().0).unwrap(), None);
+    }
+
+    #[test]
+    fn session_generation_changes_for_each_successful_start_including_replays() {
+        let (library, track_id, _, _) = test_library();
+        let factory = FakeFactory::default();
+        let mut controller = controller(&factory);
+
+        assert_eq!(controller.session_generation(), 0);
+        controller.play_track(&library, track_id).unwrap();
+        assert_eq!(controller.session_generation(), 1);
+        controller.play_track(&library, track_id).unwrap();
+        assert_eq!(controller.session_generation(), 2);
     }
 
     #[test]

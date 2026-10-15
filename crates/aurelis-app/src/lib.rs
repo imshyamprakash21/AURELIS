@@ -15,7 +15,8 @@ pub use application::desktop::{
 };
 pub use aurelis_core::audio::{SPECTRUM_BAND_COUNT, SpectrumSnapshot};
 pub use aurelis_core::library::{
-    ArtworkVisual, Lyrics, PlaylistId, SyncedLyricLine, SyncedLyricSegment, TrackId,
+    ArtworkVisual, ListeningAnalytics, ListeningPlay, Lyrics, PlaylistId, SyncedLyricLine,
+    SyncedLyricSegment, TrackId, TrackPlayCount,
 };
 
 /// Run the existing command-line interface.

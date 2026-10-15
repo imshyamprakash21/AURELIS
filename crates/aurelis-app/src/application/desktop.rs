@@ -5,17 +5,17 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, TryRecvError},
+        mpsc::{self, Receiver, Sender, TryRecvError},
     },
-    thread,
-    time::Duration,
+    thread::{self, JoinHandle},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use aurelis_core::audio::SpectrumSnapshot;
 use aurelis_core::library::{
-    Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, Lyrics, MusicLibrary,
-    PlaylistCollection, PlaylistError, PlaylistId, Track, TrackId, TrackQuery,
-    load_lyrics_for_track,
+    Album, Artist, Artwork, ArtworkCache, ArtworkFormat, ArtworkSource, ListeningAnalytics,
+    ListeningHistory, ListeningPlay, Lyrics, MusicLibrary, PlaylistCollection, PlaylistError,
+    PlaylistId, Track, TrackId, TrackQuery, load_lyrics_for_track,
 };
 
 use crate::player_controller::{PlaybackControlTarget, PlaybackStatus, PlayerController};
@@ -182,6 +182,25 @@ struct ScanResult {
     summaries: LibrarySummaries,
     playlists: PlaylistCollection,
     playlist_error: Option<String>,
+    listening_history: ListeningHistory,
+    listening_history_error: Option<String>,
+}
+
+enum ListeningHistoryCommand {
+    SelectLibrary {
+        epoch: u64,
+        path: PathBuf,
+        history: Option<ListeningHistory>,
+    },
+    Record {
+        epoch: u64,
+        play: ListeningPlay,
+    },
+}
+
+struct ListeningHistoryWriteResult {
+    epoch: u64,
+    result: Result<(), String>,
 }
 
 struct LibrarySummaries {
@@ -212,11 +231,29 @@ pub struct DesktopApplication {
     playlists: PlaylistCollection,
     playlist_path: Option<PathBuf>,
     playlist_error: Option<String>,
+    listening_history: ListeningHistory,
+    listening_analytics: ListeningAnalytics,
+    listening_history_error: Option<String>,
+    listening_history_writable: bool,
+    listening_history_epoch: u64,
+    listening_history_writer: Option<Sender<ListeningHistoryCommand>>,
+    listening_history_result_rx: Option<Receiver<ListeningHistoryWriteResult>>,
+    listening_history_writer_thread: Option<JoinHandle<()>>,
+    observed_session_generation: Option<u64>,
 }
 
 impl DesktopApplication {
     pub fn new() -> Self {
         aurelis_core::initialize();
+        let (
+            listening_history_writer,
+            listening_history_result_rx,
+            listening_history_writer_thread,
+            listening_history_error,
+        ) = match start_listening_history_writer() {
+            Ok((writer, result_rx, thread)) => (Some(writer), Some(result_rx), Some(thread), None),
+            Err(error) => (None, None, None, Some(error)),
+        };
         Self {
             library: MusicLibrary::new(),
             tracks: Vec::new(),
@@ -236,6 +273,15 @@ impl DesktopApplication {
             playlists: PlaylistCollection::new(),
             playlist_path: None,
             playlist_error: None,
+            listening_history: ListeningHistory::default(),
+            listening_analytics: ListeningAnalytics::default(),
+            listening_history_error,
+            listening_history_writable: false,
+            listening_history_epoch: 0,
+            listening_history_writer,
+            listening_history_result_rx,
+            listening_history_writer_thread,
+            observed_session_generation: None,
         }
     }
 
@@ -295,6 +341,14 @@ impl DesktopApplication {
 
     pub fn playlist_storage_error(&self) -> Option<&str> {
         self.playlist_error.as_deref()
+    }
+
+    pub fn listening_analytics(&self) -> &ListeningAnalytics {
+        &self.listening_analytics
+    }
+
+    pub fn listening_history_storage_error(&self) -> Option<&str> {
+        self.listening_history_error.as_deref()
     }
 
     pub fn can_edit_playlists(&self) -> bool {
@@ -368,6 +422,7 @@ impl DesktopApplication {
         self.player
             .play_track(&self.library, first)
             .map_err(|error| error.to_string())?;
+        self.record_new_playback_session();
         self.player.clear_upcoming_queue();
         self.player
             .enqueue_tracks(&self.library, remaining.iter().copied())
@@ -471,6 +526,11 @@ impl DesktopApplication {
                 let summaries = build_library_summaries(&library);
                 let playlist_path = worker_root.join(".aurelis_cache").join("playlists.json");
                 let (playlists, playlist_error) = load_playlists(&playlist_path);
+                let listening_history_path = worker_root
+                    .join(".aurelis_cache")
+                    .join("listening-history.json");
+                let (listening_history, listening_history_error) =
+                    load_listening_history(&listening_history_path);
                 let _ = result_tx.send(ScanResult {
                     root: worker_root,
                     library,
@@ -478,6 +538,8 @@ impl DesktopApplication {
                     summaries,
                     playlists,
                     playlist_error,
+                    listening_history,
+                    listening_history_error,
                 });
             })
             .map_err(|error| format!("Could not start the library scan: {error}"))?;
@@ -505,6 +567,9 @@ impl DesktopApplication {
             )));
         }
 
+        let same_library_root = self.library_root.as_deref() == Some(received.root.as_path());
+        let previous_history_error = self.listening_history_error.clone();
+        let previous_history_writable = self.listening_history_writable;
         self.player = PlayerController::new();
         self.player.set_volume(volume);
         self.library = received.library;
@@ -517,6 +582,51 @@ impl DesktopApplication {
         self.playlist_path = Some(received.root.join(".aurelis_cache").join("playlists.json"));
         self.playlists = received.playlists;
         self.playlist_error = received.playlist_error;
+        self.listening_history = if same_library_root {
+            self.listening_history.clone()
+        } else {
+            received.listening_history
+        };
+        self.listening_analytics = self.listening_history.analytics(8, 5);
+        let history_path = received
+            .root
+            .join(".aurelis_cache")
+            .join("listening-history.json");
+        self.listening_history_error = if same_library_root {
+            previous_history_error
+        } else {
+            received.listening_history_error
+        };
+        self.listening_history_writable = if same_library_root {
+            previous_history_writable
+        } else {
+            self.listening_history_error.is_none()
+        };
+        self.observed_session_generation = None;
+        self.listening_history_epoch = self.listening_history_epoch.wrapping_add(1);
+        if let Some(writer) = &self.listening_history_writer {
+            let history = self
+                .listening_history_writable
+                .then(|| self.listening_history.clone());
+            if writer
+                .send(ListeningHistoryCommand::SelectLibrary {
+                    epoch: self.listening_history_epoch,
+                    path: history_path,
+                    history,
+                })
+                .is_err()
+            {
+                self.listening_history_writable = false;
+                self.listening_history_error =
+                    Some("The local listening history writer stopped unexpectedly.".to_owned());
+            }
+        } else {
+            self.listening_history_writable = false;
+            if self.listening_history_error.is_none() {
+                self.listening_history_error =
+                    Some("The local listening history writer is unavailable.".to_owned());
+            }
+        }
         self.artwork_result_rx = None;
         self.artwork_loading_track = None;
         self.artwork_cache = Arc::new(Mutex::new(ArtworkCache::new()));
@@ -525,6 +635,85 @@ impl DesktopApplication {
         self.lyrics_cache.clear();
 
         Some(Ok(received.summary))
+    }
+
+    fn record_new_playback_session(&mut self) {
+        let generation = self.player.session_generation();
+        if self.observed_session_generation == Some(generation) {
+            return;
+        }
+        self.observed_session_generation = Some(generation);
+
+        let Some(track_id) = self.player.current_track_id() else {
+            return;
+        };
+        self.record_track_start(track_id);
+    }
+
+    fn record_track_start(&mut self, track_id: TrackId) {
+        let Some(track) = self.library.get(track_id) else {
+            return;
+        };
+        let play = ListeningPlay {
+            path: track.path().to_path_buf(),
+            title: track.display_title().into_owned(),
+            artist: track.display_artist().into_owned(),
+            album: track.display_album().into_owned(),
+            played_at_unix_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        if let Err(error) = self.listening_history.record_play(play.clone()) {
+            self.listening_history_error = Some(format!(
+                "Could not record this playback in listening history: {error}"
+            ));
+            return;
+        }
+        self.listening_analytics = self.listening_history.analytics(8, 5);
+
+        if !self.listening_history_writable {
+            return;
+        }
+        let Some(writer) = &self.listening_history_writer else {
+            self.listening_history_writable = false;
+            self.listening_history_error =
+                Some("The local listening history writer is unavailable.".to_owned());
+            return;
+        };
+        if writer
+            .send(ListeningHistoryCommand::Record {
+                epoch: self.listening_history_epoch,
+                play,
+            })
+            .is_err()
+        {
+            self.listening_history_writable = false;
+            self.listening_history_error =
+                Some("The local listening history writer stopped unexpectedly.".to_owned());
+        }
+    }
+
+    fn poll_listening_history_writer(&mut self) {
+        let Some(result_rx) = &self.listening_history_result_rx else {
+            return;
+        };
+        let mut latest_result = None;
+        loop {
+            match result_rx.try_recv() {
+                Ok(result) if result.epoch == self.listening_history_epoch => {
+                    latest_result = Some(result.result);
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        match latest_result {
+            Some(Ok(())) => self.listening_history_error = None,
+            Some(Err(error)) => self.listening_history_error = Some(error),
+            None => {}
+        }
     }
 
     fn update_playlists<T>(
@@ -561,10 +750,14 @@ impl DesktopApplication {
 
     /// Poll playback completion and return any playback error for presentation.
     pub fn poll_playback(&mut self) -> Option<String> {
-        self.player
+        let error = self
+            .player
             .poll_playback(&self.library)
             .and_then(Result::err)
-            .map(|error| error.to_string())
+            .map(|error| error.to_string());
+        self.record_new_playback_session();
+        self.poll_listening_history_writer();
+        error
     }
 
     pub fn playback(&self) -> PlaybackView {
@@ -591,7 +784,9 @@ impl DesktopApplication {
     pub fn play_track(&mut self, track_id: TrackId) -> Result<(), String> {
         self.player
             .play_track(&self.library, track_id)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.record_new_playback_session();
+        Ok(())
     }
 
     pub fn enqueue_track(&mut self, track_id: TrackId) -> Result<(), String> {
@@ -656,15 +851,21 @@ impl DesktopApplication {
     }
 
     pub fn play_next(&mut self) -> Result<Option<TrackId>, String> {
-        self.player
+        let result = self
+            .player
             .next(&self.library)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.record_new_playback_session();
+        Ok(result)
     }
 
     pub fn play_previous(&mut self) -> Result<Option<TrackId>, String> {
-        self.player
+        let result = self
+            .player
             .previous(&self.library)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.record_new_playback_session();
+        Ok(result)
     }
 
     /// Seek to an absolute position using the controller's existing
@@ -913,7 +1114,62 @@ impl Default for DesktopApplication {
 impl Drop for DesktopApplication {
     fn drop(&mut self) {
         let _ = self.player.shutdown();
+        self.listening_history_writer.take();
+        if let Some(writer_thread) = self.listening_history_writer_thread.take() {
+            let _ = writer_thread.join();
+        }
     }
+}
+
+fn start_listening_history_writer() -> Result<
+    (
+        Sender<ListeningHistoryCommand>,
+        Receiver<ListeningHistoryWriteResult>,
+        JoinHandle<()>,
+    ),
+    String,
+> {
+    let (command_tx, command_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("aurelis-listening-history".to_owned())
+        .spawn(move || {
+            let mut selected_library: Option<(u64, PathBuf, ListeningHistory)> = None;
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    ListeningHistoryCommand::SelectLibrary {
+                        epoch,
+                        path,
+                        history,
+                    } => {
+                        selected_library = history.map(|history| (epoch, path, history));
+                    }
+                    ListeningHistoryCommand::Record { epoch, play } => {
+                        let Some((selected_epoch, path, history)) = selected_library.as_mut()
+                        else {
+                            continue;
+                        };
+                        if *selected_epoch != epoch {
+                            continue;
+                        }
+
+                        let path_display = path.display().to_string();
+                        let result = history
+                            .record_play(play)
+                            .and_then(|()| history.save_to_path(path.as_path()))
+                            .map_err(|error| {
+                                format!(
+                                    "Could not save listening history to {}: {error}",
+                                    path_display
+                                )
+                            });
+                        let _ = result_tx.send(ListeningHistoryWriteResult { epoch, result });
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("Could not start local listening history storage: {error}"))?;
+    Ok((command_tx, result_rx, worker))
 }
 
 fn load_playlists(path: &Path) -> (PlaylistCollection, Option<String>) {
@@ -932,6 +1188,20 @@ fn load_playlists(path: &Path) -> (PlaylistCollection, Option<String>) {
     }
 }
 
+fn load_listening_history(path: &Path) -> (ListeningHistory, Option<String>) {
+    match ListeningHistory::load_from_path(path) {
+        Ok(history) => (history, None),
+        Err(error) if error.kind() == ErrorKind::NotFound => (ListeningHistory::default(), None),
+        Err(error) => (
+            ListeningHistory::default(),
+            Some(format!(
+                "Could not load listening history from {}: {error}",
+                path.display()
+            )),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -943,7 +1213,7 @@ mod tests {
 
     use super::{DesktopApplication, LibraryScanSummary, TrackSummary, build_library_summaries};
     use aurelis_core::audio::AudioMetadata;
-    use aurelis_core::library::{Lyrics, MusicLibrary, TrackId};
+    use aurelis_core::library::{ListeningHistory, ListeningPlay, Lyrics, MusicLibrary, TrackId};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -1167,6 +1437,87 @@ mod tests {
         );
         assert_eq!(
             fs::read(&playlist_path).expect("read protected file"),
+            corrupt_data
+        );
+    }
+
+    #[test]
+    fn listening_analytics_loads_saved_plays_and_persists_new_track_starts() {
+        let directory = TemporaryDirectory::new();
+        write_test_wav(&directory.path().join("Sample.wav"));
+        let cache = directory.path().join(".aurelis_cache");
+        fs::create_dir_all(&cache).expect("create test library cache");
+        let history_path = cache.join("listening-history.json");
+        let mut saved_history = ListeningHistory::default();
+        saved_history
+            .record_play(ListeningPlay {
+                path: directory.path().join("Earlier.flac"),
+                title: "Earlier track".to_owned(),
+                artist: "Earlier artist".to_owned(),
+                album: "Earlier album".to_owned(),
+                played_at_unix_seconds: 1_700_000_000,
+            })
+            .unwrap();
+        saved_history
+            .save_to_path(&history_path)
+            .expect("save existing listening history");
+
+        let mut application = DesktopApplication::new();
+        application
+            .begin_scan(directory.path())
+            .expect("start library scan");
+        wait_for_scan(&mut application);
+
+        assert_eq!(application.listening_analytics().total_play_starts, 1);
+        assert_eq!(
+            application.listening_analytics().recent_plays[0].title,
+            "Earlier track"
+        );
+
+        let track_id = application.tracks()[0].id;
+        application.record_track_start(track_id);
+        assert_eq!(application.listening_analytics().total_play_starts, 2);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            application.poll_listening_history_writer();
+            let loaded = ListeningHistory::load_from_path(&history_path);
+            if loaded.as_ref().is_ok_and(|history| history.len() == 2) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "listening history was not persisted before the deadline: {loaded:?}"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(application.listening_history_storage_error(), None);
+    }
+
+    #[test]
+    fn corrupt_listening_history_is_reported_and_never_overwritten() {
+        let directory = TemporaryDirectory::new();
+        write_test_wav(&directory.path().join("Sample.wav"));
+        let cache = directory.path().join(".aurelis_cache");
+        fs::create_dir_all(&cache).expect("create test library cache");
+        let history_path = cache.join("listening-history.json");
+        let corrupt_data = b"not a listening history file";
+        fs::write(&history_path, corrupt_data).expect("write corrupt history data");
+
+        let mut application = DesktopApplication::new();
+        application
+            .begin_scan(directory.path())
+            .expect("start library scan");
+        wait_for_scan(&mut application);
+        let track_id = application.tracks()[0].id;
+        application.record_track_start(track_id);
+
+        assert!(
+            application
+                .listening_history_storage_error()
+                .is_some_and(|error| error.contains("Could not load listening history"))
+        );
+        assert_eq!(
+            fs::read(&history_path).expect("read protected history file"),
             corrupt_data
         );
     }

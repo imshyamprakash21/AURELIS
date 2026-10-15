@@ -1,6 +1,7 @@
 mod artwork;
 mod artwork_visual;
 mod grouping;
+mod listening_history;
 mod lyrics;
 mod persistence;
 mod playlist;
@@ -13,6 +14,9 @@ pub use artwork_visual::{
     ArtworkVisual, ArtworkVisualError, BackgroundGradient, RgbColor, TextContrast,
 };
 pub use grouping::{Album, Artist};
+pub use listening_history::{
+    ArtistPlayCount, ListeningAnalytics, ListeningHistory, ListeningPlay, TrackPlayCount,
+};
 pub use lyrics::{Lyrics, LyricsError, SyncedLyricLine, SyncedLyricSegment, load_lyrics_for_track};
 pub use playlist::{Playlist, PlaylistCollection, PlaylistError, PlaylistId, PlaylistTrack};
 pub use query::{SortKey, SortOrder, TrackQuery};
