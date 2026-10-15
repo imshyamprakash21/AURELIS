@@ -37,10 +37,11 @@ pub enum SortOrder {
 /// In-memory search, filter, and sort criteria for a [`MusicLibrary`](super::MusicLibrary).
 ///
 /// All supplied criteria are combined with AND semantics. String filters use
-/// exact Unicode lowercase matching; text search uses case-insensitive
-/// substring matching over title, artist, album, album artist, and genre
-/// metadata. Search also checks the existing title, artist, and album display
-/// fallbacks. No fuzzy matching or ranking is performed. Text sort keys are
+/// exact Unicode lowercase matching; text search is case-insensitive and
+/// punctuation-tolerant, requiring each query term to match a word in title,
+/// artist, album, album artist, or genre metadata. Search also checks the
+/// existing title, artist, and album display fallbacks. No fuzzy matching or
+/// ranking is performed. Text sort keys are
 /// compared by lowercase value. For optional year, track number, disc number,
 /// and duration, `None` sorts before `Some` in ascending order and after
 /// `Some` in descending order. Duration bounds are inclusive and exclude
@@ -65,9 +66,9 @@ impl TrackQuery {
         Self::default()
     }
 
-    /// Match a case-insensitive substring in searchable metadata.
+    /// Match every case-insensitive search term in searchable metadata.
     pub fn search(mut self, text: impl AsRef<str>) -> Self {
-        self.search = Some(normalize(text.as_ref()));
+        self.search = Some(normalize_search(text.as_ref()));
         self
     }
 
@@ -193,8 +194,18 @@ fn matches(track: &Track, query: &TrackQuery) -> bool {
 }
 
 fn matches_search(track: &Track, search: &str) -> bool {
+    let search_terms: Vec<_> = search.split_whitespace().collect();
+    if search_terms.is_empty() {
+        return false;
+    }
+
     let metadata = track.metadata();
-    [
+    let display_title = track.display_title();
+    let display_artist = track.display_artist();
+    let display_album = track.display_album();
+
+    let mut searchable = String::with_capacity(128);
+    for value in [
         metadata.title.as_deref(),
         metadata.artist.as_deref(),
         metadata.album.as_deref(),
@@ -203,10 +214,19 @@ fn matches_search(track: &Track, search: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|value| normalize(value).contains(search))
-        || normalize(&track.display_title()).contains(search)
-        || normalize(&track.display_artist()).contains(search)
-        || normalize(&track.display_album()).contains(search)
+    .chain([
+        display_title.as_ref(),
+        display_artist.as_ref(),
+        display_album.as_ref(),
+    ]) {
+        append_search_field(&mut searchable, value);
+    }
+
+    search_terms.into_iter().all(|term| {
+        searchable
+            .split_whitespace()
+            .any(|word| word.contains(term))
+    })
 }
 
 fn compare_tracks(left: &Track, right: &Track, query: &TrackQuery) -> Ordering {
@@ -241,6 +261,25 @@ fn compare_folded(left: &str, right: &str) -> Ordering {
 
 fn normalize(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+fn normalize_search(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    append_search_field(&mut normalized, value);
+    normalized.trim().to_owned()
+}
+
+fn append_search_field(normalized: &mut String, value: &str) {
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            normalized.extend(character.to_lowercase());
+        } else if !normalized.is_empty() && !normalized.ends_with(' ') {
+            normalized.push(' ');
+        }
+    }
+    if !normalized.is_empty() && !normalized.ends_with(' ') {
+        normalized.push(' ');
+    }
 }
 
 fn compare_optional<T: Ord>(left: &Option<T>, right: &Option<T>) -> Ordering {
@@ -412,6 +451,45 @@ mod tests {
 
         assert_eq!(library.query(&TrackQuery::new().search("WONDER")).len(), 1);
         assert_eq!(library.query(&TrackQuery::new().search("absent")).len(), 0);
+    }
+
+    #[test]
+    fn search_matches_all_punctuation_separated_terms_and_rejects_empty_terms() {
+        let mut library = MusicLibrary::new();
+        add_track(
+            &mut library,
+            "bye.flac",
+            metadata(
+                Some("bye [Altare Remix]"),
+                Some("Ariana Grande"),
+                Some("bye [Altare Remix]"),
+                None,
+                Some("Electronic / Pop"),
+                None,
+                None,
+                None,
+            ),
+        );
+
+        assert_eq!(
+            library
+                .query(&TrackQuery::new().search("bye altare remix"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            library
+                .query(&TrackQuery::new().search("ARIANA remix"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            library
+                .query(&TrackQuery::new().search("bye missing"))
+                .len(),
+            0
+        );
+        assert_eq!(library.query(&TrackQuery::new().search("!!!")).len(), 0);
     }
 
     #[test]

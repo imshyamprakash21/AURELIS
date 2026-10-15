@@ -503,7 +503,7 @@ impl AurelisDesktop {
                 Ok(None) => {
                     self.lyrics = None;
                     self.lyrics_caption =
-                        "No local lyrics found. Add a same-stem .lrc or .txt sidecar beside the track."
+                        "No local lyrics found. Add a same-stem .lrc, .elrc, or .txt sidecar beside the track."
                             .to_owned();
                 }
                 Err(error) => {
