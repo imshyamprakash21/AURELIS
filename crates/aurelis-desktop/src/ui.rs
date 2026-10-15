@@ -21,6 +21,9 @@ use aurelis_app::{
 };
 use eframe::egui::{self, Align, Color32, ColorImage, Frame, Layout, RichText, Stroke, Vec2};
 
+const MAX_ARTWORK_IMAGE_DIMENSION: u32 = 8192;
+const MAX_ARTWORK_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
     Library,
@@ -537,7 +540,7 @@ impl AurelisDesktop {
         match thread::Builder::new()
             .name("aurelis-artwork-decode".to_owned())
             .spawn(move || {
-                let result = image::load_from_memory(&artwork.data)
+                let result = decode_artwork_image(&artwork.data)
                     .map(|decoded| {
                         let rgba = decoded.to_rgba8();
                         let visual = cached_visual.or_else(|| {
@@ -761,7 +764,7 @@ impl AurelisDesktop {
                 action = Some(TransportAction::Previous);
             }
             let play_label = match playback.state {
-                DesktopPlaybackState::Playing => "Ⅱ",
+                DesktopPlaybackState::Playing => "||",
                 _ => "▶",
             };
             if ui
@@ -2579,6 +2582,18 @@ fn artwork_format_name(format: ArtworkImageFormat) -> &'static str {
     }
 }
 
+fn decode_artwork_image(data: &[u8]) -> image::ImageResult<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(image::ImageError::IoError)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_ARTWORK_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_ARTWORK_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_ARTWORK_DECODE_BYTES);
+    reader.limits(limits);
+    reader.decode()
+}
+
 fn current_synced_lyric_index(
     lines: &[aurelis_app::SyncedLyricLine],
     position: Duration,
@@ -2655,6 +2670,45 @@ mod artwork_tint_tests {
 
         assert_eq!(middle.primary, [50, 70, 90]);
         assert_eq!(middle.accent, [70, 90, 110]);
+    }
+}
+
+#[cfg(test)]
+mod artwork_decode_tests {
+    use super::{MAX_ARTWORK_IMAGE_DIMENSION, decode_artwork_image};
+    use image::{ColorType, ImageEncoder, ImageError, codecs::png::PngEncoder};
+
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&[255, 0, 0, 255], 1, 1, ColorType::Rgba8.into())
+            .unwrap();
+        bytes
+    }
+
+    fn png_crc32(data: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ if crc & 1 == 1 { 0xedb8_8320 } else { 0 };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn decodes_normal_artwork_and_rejects_dimensions_over_the_limit() {
+        let mut oversized = one_pixel_png();
+        oversized[16..20].copy_from_slice(&(MAX_ARTWORK_IMAGE_DIMENSION + 1).to_be_bytes());
+        let header_crc = png_crc32(&oversized[12..29]);
+        oversized[29..33].copy_from_slice(&header_crc.to_be_bytes());
+
+        assert!(decode_artwork_image(&one_pixel_png()).is_ok());
+        assert!(matches!(
+            decode_artwork_image(&oversized),
+            Err(ImageError::Limits(_))
+        ));
     }
 }
 

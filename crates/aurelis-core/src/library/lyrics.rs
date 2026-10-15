@@ -1,9 +1,12 @@
 use std::{
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
+
+const MAX_LYRICS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 use super::Track;
 
@@ -145,7 +148,7 @@ pub fn load_lyrics_for_track(track: &Track) -> Result<Option<Lyrics>, LyricsErro
     let audio_path = track.path();
     for extension in ["elrc", "lrc", "txt"] {
         let path = audio_path.with_extension(extension);
-        match fs::read_to_string(&path) {
+        match read_lyrics_file(&path) {
             Ok(contents) => {
                 let lyrics = if extension != "txt" {
                     Lyrics::parse_lrc(&contents)
@@ -159,6 +162,33 @@ pub fn load_lyrics_for_track(track: &Track) -> Result<Option<Lyrics>, LyricsErro
         }
     }
     Ok(None)
+}
+
+fn read_lyrics_file(path: &Path) -> io::Result<String> {
+    read_lyrics_file_with_limit(path, MAX_LYRICS_FILE_BYTES)
+}
+
+fn read_lyrics_file_with_limit(path: &Path, maximum_bytes: u64) -> io::Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > maximum_bytes {
+        return Err(lyrics_size_error());
+    }
+
+    let mut contents = String::new();
+    file.take(maximum_bytes.saturating_add(1))
+        .read_to_string(&mut contents)?;
+    if contents.len() as u64 > maximum_bytes {
+        return Err(lyrics_size_error());
+    }
+
+    Ok(contents)
+}
+
+fn lyrics_size_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "lyrics sidecar exceeds the size limit",
+    )
 }
 
 fn parse_timestamp(tag: &str) -> Option<Duration> {
@@ -424,6 +454,18 @@ mod tests {
         fs::write(&text_path, "Plain fallback").expect("write text sidecar");
         let plain = load_lyrics_for_track(&track(&audio_path)).unwrap().unwrap();
         assert_eq!(plain.plain_text(), Some("Plain fallback"));
+    }
+
+    #[test]
+    fn rejects_lyrics_sidecars_above_the_size_limit() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("song.lrc");
+        fs::write(&path, "[00:01.00]A valid line").expect("write valid LRC sidecar");
+
+        let error = read_lyrics_file_with_limit(&path, 4).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "lyrics sidecar exceeds the size limit");
     }
 
     #[test]

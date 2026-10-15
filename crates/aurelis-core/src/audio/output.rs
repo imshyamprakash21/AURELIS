@@ -234,15 +234,7 @@ impl AudioOutput {
                 },
                 move |err| {
                     let message = err.to_string();
-
-                    if message.contains("must be rebuilt")
-                        || message.contains("configuration is no longer valid")
-                    {
-                        callback_flag.store(true, Ordering::Relaxed);
-
-                        return;
-                    }
-
+                    callback_flag.store(true, Ordering::Relaxed);
                     eprintln!("Audio output error: {message}");
                 },
                 None,
@@ -303,19 +295,14 @@ impl AudioOutput {
     }
 
     pub fn push_samples(&self, samples: &[f32]) {
-        let mut written = 0;
-
-        while written < samples.len() {
-            let pushed = self.buffer.push(&samples[written..]);
-
-            if pushed == 0 {
-                std::thread::yield_now();
-
-                continue;
-            }
-
-            written += pushed;
+        if let Err(error) = self.try_push_samples(samples) {
+            eprintln!("Audio output error: {error}");
         }
+    }
+
+    /// Push decoded PCM until accepted, or return if the device stream fails.
+    pub fn try_push_samples(&self, samples: &[f32]) -> Result<(), Box<dyn Error>> {
+        push_samples_checked(&self.buffer, &self.needs_rebuild, samples).map_err(Into::into)
     }
 
     pub fn pending_samples(&self) -> usize {
@@ -353,6 +340,30 @@ impl AudioOutput {
     pub fn ring_buffer(&self) -> Arc<AudioRingBuffer> {
         Arc::clone(&self.buffer)
     }
+}
+
+fn push_samples_checked(
+    buffer: &AudioRingBuffer,
+    needs_rebuild: &AtomicBool,
+    samples: &[f32],
+) -> Result<(), &'static str> {
+    let mut written = 0;
+
+    while written < samples.len() {
+        if needs_rebuild.load(Ordering::Relaxed) {
+            return Err("Audio output stream failed and must be rebuilt");
+        }
+
+        let pushed = buffer.push(&samples[written..]);
+        if pushed == 0 {
+            std::thread::yield_now();
+            continue;
+        }
+
+        written += pushed;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -437,6 +448,31 @@ fn fill_output_with_analysis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn producer_returns_when_the_audio_stream_has_failed() {
+        let buffer = AudioRingBuffer::new(4);
+        let needs_rebuild = AtomicBool::new(true);
+        buffer.push(&[1.0, 2.0, 3.0]);
+
+        assert_eq!(
+            push_samples_checked(&buffer, &needs_rebuild, &[4.0]),
+            Err("Audio output stream failed and must be rebuilt")
+        );
+        assert_eq!(buffer.len(), 3);
+    }
+
+    #[test]
+    fn producer_pushes_all_samples_while_the_stream_is_healthy() {
+        let buffer = AudioRingBuffer::new(8);
+        let needs_rebuild = AtomicBool::new(false);
+
+        push_samples_checked(&buffer, &needs_rebuild, &[1.0, 2.0, 3.0]).unwrap();
+
+        let mut output = [0.0; 3];
+        assert_eq!(buffer.pop(&mut output), 3);
+        assert_eq!(output, [1.0, 2.0, 3.0]);
+    }
 
     fn playing_callback_state() -> OutputCallbackState {
         OutputCallbackState {

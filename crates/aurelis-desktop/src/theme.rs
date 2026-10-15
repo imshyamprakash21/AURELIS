@@ -100,7 +100,7 @@ pub(crate) mod motion {
 }
 
 pub(crate) mod window {
-    pub(crate) const INITIAL_SIZE: [f32; 2] = [1320.0, 840.0];
+    pub(crate) const INITIAL_SIZE: [f32; 2] = [1320.0, 720.0];
     pub(crate) const MINIMUM_SIZE: [f32; 2] = [900.0, 620.0];
 }
 
@@ -115,6 +115,6 @@ mod tests {
         assert_eq!(typography::PAGE_TITLE, 34.0);
         assert_eq!(radius::WINDOW, eframe::egui::CornerRadius::same(6));
         assert_eq!(motion::ANIMATION_SECONDS, 0.2);
-        assert_eq!(window::INITIAL_SIZE, [1320.0, 840.0]);
+        assert_eq!(window::INITIAL_SIZE, [1320.0, 720.0]);
     }
 }

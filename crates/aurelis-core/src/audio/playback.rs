@@ -606,7 +606,7 @@ fn run_playback_pipeline(
             };
 
             if !chunk.samples.is_empty() {
-                output.push_samples(&chunk.samples);
+                output.try_push_samples(&chunk.samples)?;
             }
         }
 
@@ -614,7 +614,7 @@ fn run_playback_pipeline(
             let tail = resampler.flush()?;
 
             if !tail.samples.is_empty() {
-                output.push_samples(&tail.samples);
+                output.try_push_samples(&tail.samples)?;
             }
         }
 
@@ -747,7 +747,7 @@ fn apply_seek(
         decode_next_output_chunk(decoder, channel_conversion, channel_output_spec, resampler)?
     {
         if !pcm.samples.is_empty() {
-            output.push_samples(&pcm.samples);
+            output.try_push_samples(&pcm.samples)?;
         }
 
         if resume_after_seek {

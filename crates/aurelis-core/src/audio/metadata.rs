@@ -89,7 +89,7 @@ impl AudioMetadata {
         };
 
         if let (Some(frames), Some(rate)) = (params.n_frames, params.sample_rate) {
-            meta.duration = Some(Duration::from_secs_f64(frames as f64 / rate as f64));
+            meta.duration = duration_from_frames(frames, rate);
         }
 
         if let Some(revision) = format.metadata().current() {
@@ -150,6 +150,14 @@ impl AudioMetadata {
             None => "--:--".to_string(),
         }
     }
+}
+
+fn duration_from_frames(frames: u64, sample_rate: u32) -> Option<Duration> {
+    if sample_rate == 0 {
+        return None;
+    }
+
+    Duration::try_from_secs_f64(frames as f64 / f64::from(sample_rate)).ok()
 }
 
 fn normalize_optional_text(value: &mut Option<String>) {
@@ -239,6 +247,28 @@ mod tests {
         meta.duration = Some(Duration::from_secs(200));
 
         assert_eq!(meta.duration_string(), "03:20");
+    }
+
+    #[test]
+    fn duration_from_frames_handles_valid_audio_parameters() {
+        assert_eq!(
+            duration_from_frames(44_100, 44_100),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            duration_from_frames(22_050, 44_100),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn duration_from_frames_skips_zero_sample_rate() {
+        assert_eq!(duration_from_frames(44_100, 0), None);
+    }
+
+    #[test]
+    fn duration_from_frames_rejects_values_outside_duration_range() {
+        assert_eq!(duration_from_frames(u64::MAX, 1), None);
     }
 
     #[test]

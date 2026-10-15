@@ -10,6 +10,9 @@ use crate::audio::album_art::{extract_album_art, read_artwork_file};
 
 pub use crate::audio::album_art::{AlbumArt as Artwork, ArtworkFormat, ArtworkSource};
 
+const MAX_CACHED_TRACKS: usize = 512;
+const MAX_CACHED_ARTWORK_BYTES: usize = 128 * 1024 * 1024;
+
 const EXPLICIT_ARTWORK_NAMES: &[&str] = &[
     "albumart.jpg",
     "albumart.jpeg",
@@ -53,6 +56,7 @@ pub struct ArtworkCache {
     by_track: HashMap<PathBuf, Option<Arc<Artwork>>>,
     by_directory: HashMap<PathBuf, Vec<PathBuf>>,
     by_external_file: HashMap<PathBuf, Option<Arc<Artwork>>>,
+    cached_artwork_bytes: usize,
 }
 
 impl ArtworkCache {
@@ -70,9 +74,12 @@ impl ArtworkCache {
         if let Some(artwork) = self.by_track.get(&track_path) {
             return artwork.clone();
         }
+        if self.by_track.len() >= MAX_CACHED_TRACKS {
+            self.clear();
+        }
 
         let embedded = extract_album_art(&track_path).ok().flatten().map(Arc::new);
-        let artwork = prefer_embedded_artwork(embedded, || {
+        let mut artwork = prefer_embedded_artwork(embedded, || {
             for image_path in self.external_artwork_paths(&track_path) {
                 if let Some(found) = self.external_artwork(&image_path) {
                     return Some(found);
@@ -81,6 +88,12 @@ impl ArtworkCache {
             None
         });
 
+        if artwork.as_ref().is_some_and(|artwork| {
+            matches!(artwork.source(), ArtworkSource::Embedded)
+                && !self.reserve_cache_bytes(artwork.data().len())
+        }) {
+            artwork = None;
+        }
         self.by_track.insert(track_path, artwork.clone());
         artwork
     }
@@ -90,6 +103,19 @@ impl ArtworkCache {
         self.by_track.clear();
         self.by_directory.clear();
         self.by_external_file.clear();
+        self.cached_artwork_bytes = 0;
+    }
+
+    fn reserve_cache_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > MAX_CACHED_ARTWORK_BYTES {
+            self.clear();
+            return false;
+        }
+        if self.cached_artwork_bytes.saturating_add(bytes) > MAX_CACHED_ARTWORK_BYTES {
+            self.clear();
+        }
+        self.cached_artwork_bytes += bytes;
+        true
     }
 
     fn external_artwork_paths(&mut self, track_path: &Path) -> Vec<PathBuf> {
@@ -112,7 +138,13 @@ impl ArtworkCache {
             return artwork.clone();
         }
 
-        let artwork = read_artwork_file(path).map(Arc::new);
+        let mut artwork = read_external_artwork(path).map(Arc::new);
+        if artwork
+            .as_ref()
+            .is_some_and(|artwork| !self.reserve_cache_bytes(artwork.data().len()))
+        {
+            artwork = None;
+        }
         self.by_external_file.insert(key, artwork.clone());
         artwork
     }
@@ -127,8 +159,20 @@ pub fn load_artwork_for_track(track: &Track) -> Option<Artwork> {
     prefer_embedded_artwork(embedded, || {
         external_artwork_paths(track.path())
             .iter()
-            .find_map(|path| read_artwork_file(path))
+            .find_map(|path| read_external_artwork(path))
     })
+}
+
+fn read_external_artwork(path: &Path) -> Option<Artwork> {
+    read_external_artwork_with_limit(path, MAX_CACHED_ARTWORK_BYTES as u64)
+}
+
+fn read_external_artwork_with_limit(path: &Path, maximum_bytes: u64) -> Option<Artwork> {
+    if fs::metadata(path).ok()?.len() > maximum_bytes {
+        return None;
+    }
+
+    read_artwork_file(path)
 }
 
 fn prefer_embedded_artwork<T>(
@@ -196,7 +240,10 @@ mod tests {
         library::MusicLibrary,
     };
 
-    use super::{ArtworkCache, ArtworkFormat, load_artwork_for_track};
+    use super::{
+        ArtworkCache, ArtworkFormat, MAX_CACHED_ARTWORK_BYTES, MAX_CACHED_TRACKS,
+        load_artwork_for_track, read_external_artwork_with_limit,
+    };
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -389,6 +436,15 @@ mod tests {
     }
 
     #[test]
+    fn external_artwork_over_the_size_limit_is_skipped_before_reading() {
+        let directory = TemporaryDirectory::new();
+        let cover_path = directory.path().join("cover.png");
+        fs::write(&cover_path, png_bytes()).expect("write valid PNG cover");
+
+        assert!(read_external_artwork_with_limit(&cover_path, 1).is_none());
+    }
+
+    #[test]
     fn embedded_artwork_precedes_explicit_and_common_files() {
         let directory = TemporaryDirectory::new();
         let track_path = directory.path().join("song.flac");
@@ -443,6 +499,21 @@ mod tests {
     }
 
     #[test]
+    fn cache_counts_shared_external_artwork_bytes_once() {
+        let directory = TemporaryDirectory::new();
+        let track_path = directory.path().join("song.flac");
+        let cover_path = directory.path().join("cover.png");
+        fs::write(&track_path, b"not an audio file").expect("write fake audio file");
+        fs::write(&cover_path, png_bytes()).expect("write PNG cover");
+        let expected_bytes = png_bytes().len();
+        let track = track(&track_path);
+        let mut cache = ArtworkCache::new();
+
+        assert!(cache.get_for_track(&track).is_some());
+        assert_eq!(cache.cached_artwork_bytes, expected_bytes);
+    }
+
+    #[test]
     fn cache_remembers_missing_artwork_until_cleared() {
         let directory = TemporaryDirectory::new();
         let track_path = directory.path().join("song.flac");
@@ -456,6 +527,40 @@ mod tests {
 
         cache.clear();
         assert!(cache.get_for_track(&track).is_some());
+    }
+
+    #[test]
+    fn cache_bounds_track_entries_as_tracks_are_browsed() {
+        let directory = TemporaryDirectory::new();
+        let mut library = MusicLibrary::new();
+        let mut cache = ArtworkCache::new();
+
+        for index in 0..=MAX_CACHED_TRACKS {
+            let path = directory.path().join(format!("track-{index}.flac"));
+            let track_id = library.add_track(path, AudioMetadata::default());
+            assert!(
+                cache
+                    .get_for_track(library.get(track_id).unwrap())
+                    .is_none()
+            );
+        }
+
+        assert_eq!(cache.by_track.len(), 1);
+        assert_eq!(cache.by_directory.len(), 1);
+        assert_eq!(cache.cached_artwork_bytes, 0);
+    }
+
+    #[test]
+    fn cache_clears_entries_before_exceeding_its_artwork_byte_budget() {
+        let mut cache = ArtworkCache::new();
+        cache.by_track.insert(PathBuf::from("stale-track"), None);
+        cache.cached_artwork_bytes = MAX_CACHED_ARTWORK_BYTES;
+
+        assert!(cache.reserve_cache_bytes(1));
+        assert!(cache.by_track.is_empty());
+        assert_eq!(cache.cached_artwork_bytes, 1);
+        assert!(!cache.reserve_cache_bytes(MAX_CACHED_ARTWORK_BYTES + 1));
+        assert_eq!(cache.cached_artwork_bytes, 0);
     }
 
     #[test]
