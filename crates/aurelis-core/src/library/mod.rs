@@ -15,7 +15,8 @@ pub use artwork_visual::{
 };
 pub use grouping::{Album, Artist};
 pub use listening_history::{
-    ArtistPlayCount, ListeningAnalytics, ListeningHistory, ListeningPlay, TrackPlayCount,
+    ArtistPlayCount, GenrePlayCount, ListeningAnalytics, ListeningDNA, ListeningHistory,
+    ListeningPlay, TrackPlayCount,
 };
 pub use lyrics::{Lyrics, LyricsError, SyncedLyricLine, SyncedLyricSegment, load_lyrics_for_track};
 pub use playlist::{Playlist, PlaylistCollection, PlaylistError, PlaylistId, PlaylistTrack};

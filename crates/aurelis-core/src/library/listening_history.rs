@@ -28,6 +28,9 @@ pub struct ListeningPlay {
     pub artist: String,
     /// Album captured when playback started.
     pub album: String,
+    /// Genre tag captured when playback started, if present.
+    #[serde(default)]
+    pub genre: Option<String>,
     /// Unix time in seconds when playback started.
     pub played_at_unix_seconds: u64,
 }
@@ -51,6 +54,31 @@ pub struct ArtistPlayCount {
     pub last_played_at_unix_seconds: u64,
 }
 
+/// Aggregated play count for a known genre tag.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenrePlayCount {
+    pub genre: String,
+    pub play_count: usize,
+    pub last_played_at_unix_seconds: u64,
+}
+
+/// Descriptive profile calculated only from retained local playback starts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListeningDNA {
+    /// Number of playback starts in the retained history window.
+    pub play_starts: usize,
+    /// Distinct track paths in the retained history window.
+    pub unique_tracks: usize,
+    /// Distinct known artist names in the retained history window.
+    pub unique_artists: usize,
+    /// Additional starts for tracks already started in this history window.
+    pub repeat_starts: usize,
+    /// Starts whose track had a non-empty genre tag.
+    pub genre_tagged_starts: usize,
+    /// Most-played known genres, ordered by count and then recency.
+    pub genre_distribution: Vec<GenrePlayCount>,
+}
+
 /// Data-driven listening statistics derived from saved playback starts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListeningAnalytics {
@@ -66,6 +94,8 @@ pub struct ListeningAnalytics {
     pub top_tracks: Vec<TrackPlayCount>,
     /// Most-played known artists, ordered by count and then recency.
     pub top_artists: Vec<ArtistPlayCount>,
+    /// Descriptive signals calculated from the same retained play events.
+    pub listening_dna: ListeningDNA,
 }
 
 /// Bounded local history of actual playback starts.
@@ -106,6 +136,7 @@ impl ListeningHistory {
     pub fn analytics(&self, recent_limit: usize, ranking_limit: usize) -> ListeningAnalytics {
         let mut tracks: HashMap<PathBuf, TrackPlayCount> = HashMap::new();
         let mut artists: HashMap<String, ArtistPlayCount> = HashMap::new();
+        let mut genres: HashMap<String, GenrePlayCount> = HashMap::new();
 
         for play in &self.entries {
             let track = tracks
@@ -136,10 +167,32 @@ impl ListeningHistory {
                 artist.play_count = artist.play_count.saturating_add(1);
                 artist.last_played_at_unix_seconds = play.played_at_unix_seconds;
             }
+
+            if let Some(genre_name) = play
+                .genre
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("unknown genre"))
+            {
+                let key = genre_name.to_lowercase();
+                let genre = genres.entry(key).or_insert_with(|| GenrePlayCount {
+                    genre: genre_name.to_owned(),
+                    play_count: 0,
+                    last_played_at_unix_seconds: play.played_at_unix_seconds,
+                });
+                genre.genre = genre_name.to_owned();
+                genre.play_count = genre.play_count.saturating_add(1);
+                genre.last_played_at_unix_seconds = play.played_at_unix_seconds;
+            }
         }
 
         let unique_tracks = tracks.len();
         let unique_artists = artists.len();
+        let repeat_starts = tracks
+            .values()
+            .map(|track| track.play_count.saturating_sub(1))
+            .sum();
+        let genre_tagged_starts = genres.values().map(|genre| genre.play_count).sum();
         let mut top_tracks: Vec<_> = tracks.into_values().collect();
         top_tracks.sort_by(|left, right| {
             right
@@ -169,6 +222,20 @@ impl ListeningHistory {
         });
         top_artists.truncate(ranking_limit);
 
+        let mut genre_distribution: Vec<_> = genres.into_values().collect();
+        genre_distribution.sort_by(|left, right| {
+            right
+                .play_count
+                .cmp(&left.play_count)
+                .then_with(|| {
+                    right
+                        .last_played_at_unix_seconds
+                        .cmp(&left.last_played_at_unix_seconds)
+                })
+                .then_with(|| left.genre.cmp(&right.genre))
+        });
+        genre_distribution.truncate(ranking_limit);
+
         ListeningAnalytics {
             total_play_starts: self.entries.len(),
             unique_tracks,
@@ -182,6 +249,14 @@ impl ListeningHistory {
                 .collect(),
             top_tracks,
             top_artists,
+            listening_dna: ListeningDNA {
+                play_starts: self.entries.len(),
+                unique_tracks,
+                unique_artists,
+                repeat_starts,
+                genre_tagged_starts,
+                genre_distribution,
+            },
         }
     }
 
@@ -249,6 +324,15 @@ fn validate_play(play: &ListeningPlay) -> io::Result<()> {
     {
         return Err(invalid_data(
             "listening history contains oversized track metadata",
+        ));
+    }
+    if play
+        .genre
+        .as_ref()
+        .is_some_and(|genre| genre.len() > MAX_TEXT_BYTES)
+    {
+        return Err(invalid_data(
+            "listening history contains oversized genre metadata",
         ));
     }
     Ok(())
@@ -332,6 +416,7 @@ mod tests {
             title: title.to_owned(),
             artist: artist.to_owned(),
             album: "Album".to_owned(),
+            genre: None,
             played_at_unix_seconds: time,
         }
     }
@@ -341,14 +426,14 @@ mod tests {
         let directory = TemporaryDirectory::new();
         let path = directory.path().join("listening-history.json");
         let mut history = ListeningHistory::default();
-        history
-            .record_play(play(
-                "Music/Artist/アルバム/曲.flac",
-                "曲名",
-                " артист",
-                1_700_000_000,
-            ))
-            .unwrap();
+        let mut event = play(
+            "Music/Artist/アルバム/曲.flac",
+            "曲名",
+            " артист",
+            1_700_000_000,
+        );
+        event.genre = Some("Jazz".to_owned());
+        history.record_play(event).unwrap();
 
         history.save_to_path(&path).unwrap();
         let loaded = ListeningHistory::load_from_path(&path).unwrap();
@@ -385,6 +470,34 @@ mod tests {
     }
 
     #[test]
+    fn listening_dna_groups_tagged_genres_and_counts_replays_in_the_window() {
+        let mut history = ListeningHistory::default();
+        let mut first = play("one.flac", "One", "Artist", 10);
+        first.genre = Some("Jazz".to_owned());
+        history.record_play(first.clone()).unwrap();
+        first.genre = Some("jazz".to_owned());
+        first.played_at_unix_seconds = 20;
+        history.record_play(first).unwrap();
+        let mut second = play("two.flac", "Two", "Other artist", 30);
+        second.genre = Some("Rock".to_owned());
+        history.record_play(second).unwrap();
+        history
+            .record_play(play("three.flac", "Three", "Unknown artist", 40))
+            .unwrap();
+
+        let dna = history.analytics(8, 5).listening_dna;
+
+        assert_eq!(dna.play_starts, 4);
+        assert_eq!(dna.unique_tracks, 3);
+        assert_eq!(dna.unique_artists, 2);
+        assert_eq!(dna.repeat_starts, 1);
+        assert_eq!(dna.genre_tagged_starts, 3);
+        assert_eq!(dna.genre_distribution[0].genre, "jazz");
+        assert_eq!(dna.genre_distribution[0].play_count, 2);
+        assert_eq!(dna.genre_distribution[1].genre, "Rock");
+    }
+
+    #[test]
     fn missing_or_malformed_history_is_reported() {
         let directory = TemporaryDirectory::new();
         let path = directory.path().join("listening-history.json");
@@ -397,6 +510,22 @@ mod tests {
             ListeningHistory::load_from_path(&path).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn history_saved_before_genre_tags_were_added_still_loads() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.path().join("listening-history.json");
+        fs::write(
+            &path,
+            br#"{"version":1,"entries":[{"path":"old.flac","title":"Old","artist":"Artist","album":"Album","played_at_unix_seconds":1}]}"#,
+        )
+        .unwrap();
+
+        let history = ListeningHistory::load_from_path(path).unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.analytics(1, 1).listening_dna.genre_tagged_starts, 0);
     }
 
     #[test]

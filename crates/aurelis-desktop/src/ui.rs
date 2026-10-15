@@ -30,6 +30,7 @@ enum Page {
     Universe,
     NowPlaying,
     Analytics,
+    ListeningDna,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -686,6 +687,10 @@ impl AurelisDesktop {
         ui.add_space(spacing::GAP_6);
         if navigation_button(ui, "04", "Analytics", self.page == Page::Analytics) {
             self.page = Page::Analytics;
+        }
+        ui.add_space(spacing::GAP_6);
+        if navigation_button(ui, "05", "Listening DNA", self.page == Page::ListeningDna) {
+            self.page = Page::ListeningDna;
         }
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
@@ -1634,6 +1639,104 @@ impl AurelisDesktop {
         }
     }
 
+    fn draw_listening_dna(&self, ui: &mut egui::Ui) {
+        let dna = self.application.listening_analytics().listening_dna.clone();
+        ui.add_space(spacing::GAP_34);
+        ui.label(
+            RichText::new("YOUR LISTENING")
+                .size(typography::CAPTION)
+                .strong()
+                .color(ACCENT),
+        );
+        ui.add_space(spacing::GAP_8);
+        ui.heading(
+            RichText::new("Listening DNA")
+                .size(typography::PAGE_TITLE)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(spacing::GAP_8);
+        ui.label(
+            RichText::new("A factual profile of playback starts in this library's saved history.")
+                .size(typography::BODY)
+                .color(MUTED),
+        );
+        ui.add_space(spacing::GAP_18);
+
+        if let Some(error) = self.application.listening_history_storage_error() {
+            draw_message(
+                ui,
+                &BannerMessage {
+                    text: error.to_owned(),
+                    tone: MessageTone::Error,
+                },
+            );
+            ui.add_space(spacing::GAP_10);
+        }
+
+        if dna.play_starts == 0 {
+            empty_state(
+                ui,
+                "Your Listening DNA is waiting",
+                "Play music from this library. AURELIS will build this profile from real starts and available genre tags.",
+            );
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            library_statistic(ui, "Play starts", dna.play_starts);
+            library_statistic(ui, "Unique tracks", dna.unique_tracks);
+            library_statistic(ui, "Known artists", dna.unique_artists);
+            library_statistic(ui, "Repeat starts", dna.repeat_starts);
+        });
+
+        ui.add_space(spacing::GAP_28);
+        section_heading(ui, "TOP GENRE TAGS · RETAINED HISTORY");
+        ui.add_space(spacing::GAP_8);
+        ui.label(
+            RichText::new(format!(
+                "{} of {} starts include a genre tag · top five shown",
+                dna.genre_tagged_starts, dna.play_starts
+            ))
+            .size(typography::BODY_SMALL)
+            .color(MUTED),
+        );
+        ui.add_space(spacing::GAP_8);
+
+        if dna.genre_distribution.is_empty() {
+            ui.label(
+                RichText::new("No genre tags are available in this history window.")
+                    .size(typography::BODY_SMALL)
+                    .color(MUTED),
+            );
+        } else {
+            for genre in &dna.genre_distribution {
+                let share = genre.play_count as f32 / dna.genre_tagged_starts as f32;
+                ui.add(
+                    egui::ProgressBar::new(share.clamp(0.0, 1.0))
+                        .desired_width(ui.available_width())
+                        .fill(ACCENT)
+                        .text(format!(
+                            "{} · {} starts · {:.0}%",
+                            genre.genre,
+                            genre.play_count,
+                            share * 100.0
+                        )),
+                );
+                ui.add_space(spacing::GAP_8);
+            }
+        }
+
+        ui.add_space(spacing::GAP_18);
+        ui.label(
+            RichText::new(
+                "Repeat starts count later starts of tracks already started in this retained history. Genre shares exclude untagged starts; tags outside the top five may account for the remaining share. These figures describe starts, not time listened.",
+            )
+            .size(typography::CAPTION)
+            .color(MUTED),
+        );
+    }
+
     fn draw_album_groups(&mut self, ui: &mut egui::Ui) {
         let groups = self.application.albums();
         if groups.is_empty() {
@@ -2285,6 +2388,11 @@ impl eframe::App for AurelisDesktop {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| self.draw_analytics(ui));
+                }
+                Page::ListeningDna => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.draw_listening_dna(ui));
                 }
             });
 

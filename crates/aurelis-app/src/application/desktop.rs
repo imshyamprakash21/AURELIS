@@ -659,6 +659,7 @@ impl DesktopApplication {
             title: track.display_title().into_owned(),
             artist: track.display_artist().into_owned(),
             album: track.display_album().into_owned(),
+            genre: track.metadata().genre.clone(),
             played_at_unix_seconds: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1455,6 +1456,7 @@ mod tests {
                 title: "Earlier track".to_owned(),
                 artist: "Earlier artist".to_owned(),
                 album: "Earlier album".to_owned(),
+                genre: None,
                 played_at_unix_seconds: 1_700_000_000,
             })
             .unwrap();
