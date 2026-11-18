@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Lock-free single-producer/single-consumer ring buffer.
@@ -9,11 +10,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// No mutexes are used.
 pub struct AudioRingBuffer {
-    buffer: Box<[f32]>,
+    buffer: Box<[UnsafeCell<f32>]>,
     capacity: usize,
     write: AtomicUsize,
     read: AtomicUsize,
 }
+
+// SAFETY: the samples live in `UnsafeCell`s and are only touched through
+// `push`/`push_mono_downmix` (the single producer) and `pop` (the single
+// consumer). The producer only writes slots the consumer has already released,
+// and the consumer only reads slots the producer has already published; the
+// hand-over is the Release store / Acquire load on the `write` and `read`
+// indices. `clear` must only run while no callback is consuming.
+unsafe impl Sync for AudioRingBuffer {}
 
 impl AudioRingBuffer {
     /// Create a new ring buffer.
@@ -21,7 +30,10 @@ impl AudioRingBuffer {
         assert!(capacity > 1, "capacity must be greater than 1");
 
         Self {
-            buffer: vec![0.0; capacity].into_boxed_slice(),
+            buffer: (0..capacity)
+                .map(|_| UnsafeCell::new(0.0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             capacity,
             write: AtomicUsize::new(0),
             read: AtomicUsize::new(0),
@@ -65,9 +77,10 @@ impl AudioRingBuffer {
                 break;
             }
 
+            // SAFETY: slot `w` is free (the consumer has released it) and is
+            // not visible to the consumer until the `write` store below.
             unsafe {
-                let ptr = self.buffer.as_ptr() as *mut f32;
-                ptr.add(w).write(input[written]);
+                self.buffer[w].get().write(input[written]);
             }
 
             self.write.store(next, Ordering::Release);
@@ -105,9 +118,9 @@ impl AudioRingBuffer {
                 .sum::<f32>()
                 / channels as f32;
             let index = (write + frame_index) % self.capacity;
+            // SAFETY: as in `push`: the slot is free and unpublished.
             unsafe {
-                let ptr = self.buffer.as_ptr() as *mut f32;
-                ptr.add(index).write(mono);
+                self.buffer[index].get().write(mono);
             }
         }
 
@@ -133,7 +146,9 @@ impl AudioRingBuffer {
                 break;
             }
 
-            output[read_count] = unsafe { *self.buffer.as_ptr().add(r) };
+            // SAFETY: slot `r` was published by the producer's Release store
+            // and is not reused until the `read` store below.
+            output[read_count] = unsafe { self.buffer[r].get().read() };
 
             self.read.store((r + 1) % self.capacity, Ordering::Release);
 
@@ -242,5 +257,64 @@ mod tests {
         assert!(rb.is_full());
 
         assert_eq!(rb.push(&[4.0]), 0);
+    }
+
+    #[test]
+    fn order_is_preserved_when_producer_and_consumer_run_concurrently() {
+        use std::sync::Arc;
+
+        const TOTAL: usize = 200_000;
+
+        let rb = Arc::new(AudioRingBuffer::new(64));
+
+        let producer_rb = Arc::clone(&rb);
+        let producer = std::thread::spawn(move || {
+            let mut next = 0usize;
+            let mut chunk = [0.0f32; 37];
+
+            while next < TOTAL {
+                let n = chunk.len().min(TOTAL - next);
+
+                for (i, slot) in chunk[..n].iter_mut().enumerate() {
+                    *slot = (next + i) as f32;
+                }
+
+                let mut offset = 0;
+                while offset < n {
+                    let written = producer_rb.push(&chunk[offset..n]);
+
+                    if written == 0 {
+                        std::thread::yield_now();
+                    }
+
+                    offset += written;
+                }
+
+                next += n;
+            }
+        });
+
+        let consumer_rb = Arc::clone(&rb);
+        let consumer = std::thread::spawn(move || {
+            let mut expected = 0usize;
+            let mut out = [0.0f32; 53];
+
+            while expected < TOTAL {
+                let read = consumer_rb.pop(&mut out);
+
+                if read == 0 {
+                    std::thread::yield_now();
+                    continue;
+                }
+
+                for &value in &out[..read] {
+                    assert_eq!(value, expected as f32, "sample out of order");
+                    expected += 1;
+                }
+            }
+        });
+
+        producer.join().unwrap();
+        consumer.join().unwrap();
     }
 }

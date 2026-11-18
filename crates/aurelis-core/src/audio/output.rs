@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::time::Duration;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -234,7 +235,11 @@ impl AudioOutput {
                 },
                 move |err| {
                     let message = err.to_string();
-                    callback_flag.store(true, Ordering::Relaxed);
+
+                    if is_fatal_stream_error(err.kind()) {
+                        callback_flag.store(true, Ordering::Relaxed);
+                    }
+
                     eprintln!("Audio output error: {message}");
                 },
                 None,
@@ -342,10 +347,45 @@ impl AudioOutput {
     }
 }
 
+/// How long the producer sleeps when the ring buffer is full.
+///
+/// The ring holds a couple of seconds of audio and one decoded chunk is only
+/// tens of milliseconds long, so waiting a few milliseconds costs nothing.
+/// Spinning instead (`yield_now` in a loop) keeps a whole CPU core busy for
+/// the entire track, because the producer is always faster than real time.
+const PUSH_RETRY_DELAY: Duration = Duration::from_millis(2);
+
+/// Whether a CPAL stream error means the stream is dead and must be rebuilt.
+///
+/// CPAL also reports problems that leave the stream running: a single xrun
+/// glitch, the default device being re-routed (the stream follows it), or a
+/// refused real-time priority. Aborting the track for those would turn a
+/// harmless hiccup into a stopped song. Anything else, including error kinds
+/// added to CPAL later, is treated as fatal: the safe default.
+fn is_fatal_stream_error(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
 fn push_samples_checked(
     buffer: &AudioRingBuffer,
     needs_rebuild: &AtomicBool,
     samples: &[f32],
+) -> Result<(), &'static str> {
+    push_samples_with_wait(buffer, needs_rebuild, samples, &mut || {
+        std::thread::sleep(PUSH_RETRY_DELAY)
+    })
+}
+
+/// Push until everything is accepted. `wait` runs after every attempt that
+/// found the ring buffer full.
+fn push_samples_with_wait(
+    buffer: &AudioRingBuffer,
+    needs_rebuild: &AtomicBool,
+    samples: &[f32],
+    wait: &mut dyn FnMut(),
 ) -> Result<(), &'static str> {
     let mut written = 0;
 
@@ -356,7 +396,7 @@ fn push_samples_checked(
 
         let pushed = buffer.push(&samples[written..]);
         if pushed == 0 {
-            std::thread::yield_now();
+            wait();
             continue;
         }
 
@@ -678,5 +718,54 @@ mod tests {
         let flag = AtomicBool::new(false);
 
         assert!(!flag.load(Ordering::Relaxed,));
+    }
+
+    #[test]
+    fn producer_waits_once_per_failed_attempt_instead_of_spinning() {
+        let buffer = AudioRingBuffer::new(4);
+        buffer.push(&[1.0, 2.0, 3.0]); // full: capacity - 1
+        let needs_rebuild = AtomicBool::new(false);
+        let mut waits = 0usize;
+
+        // The consumer frees space only after the producer has waited 3 times.
+        let result = push_samples_with_wait(&buffer, &needs_rebuild, &[4.0], &mut || {
+            waits += 1;
+
+            if waits == 3 {
+                let mut sink = [0.0; 3];
+                buffer.pop(&mut sink);
+            }
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(waits, 3);
+    }
+
+    #[test]
+    fn production_retry_delay_is_a_real_sleep() {
+        assert!(PUSH_RETRY_DELAY >= Duration::from_millis(1));
+    }
+
+    #[test]
+    fn only_survivable_stream_errors_keep_playback_going() {
+        use cpal::ErrorKind;
+
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::DeviceChanged,
+            ErrorKind::RealtimeDenied,
+        ] {
+            assert!(!is_fatal_stream_error(kind), "{kind:?} should not abort playback");
+        }
+
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::HostUnavailable,
+            ErrorKind::BackendError,
+            ErrorKind::Other,
+        ] {
+            assert!(is_fatal_stream_error(kind), "{kind:?} must trigger a rebuild");
+        }
     }
 }
